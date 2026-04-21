@@ -460,6 +460,67 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
   );
 
   server.tool(
+    "site_configuration_get",
+    "Read the raw nginx (frontend), apache (backend) and php.ini configs for a site. Returns the literal config text as stored by FastPanel. Use before site_configuration_update to see current state — FastPanel's default configs often miss hardening (no .git/.env blocking, etc). Endpoint: GET /api/sites/{site_id}/configuration.",
+    { site_id: z.number().int().positive().describe("Site id from sites_list") },
+    async ({ site_id }) => {
+      try {
+        const data = await client.get(`/api/sites/${site_id}/configuration`);
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "site_configuration_update",
+    "Replace the nginx (frontend), apache (backend) and php.ini config for a site. DANGEROUS: invalid syntax can take down the site or the whole nginx/apache service. Recommended flow: (1) call site_configuration_get first, (2) modify only the sections you need, (3) pass ALL three strings back unchanged+edited. All three fields are REQUIRED — there is no partial update. Endpoint: PUT /api/sites/{site_id}/configuration. WRITE — confirm:true required.",
+    {
+      site_id: z.number().int().positive().describe("Site id from sites_list"),
+      frontend: z
+        .string()
+        .min(1)
+        .describe("Full nginx config for this site (HTTPS server block + HTTP redirect block)"),
+      backend: z
+        .string()
+        .min(1)
+        .describe("Full apache/httpd config for this site (VirtualHost block)"),
+      phpini: z.string().describe("Full php.ini overrides for this site"),
+      confirm: z.boolean().default(false),
+      dry_run: z.boolean().default(false),
+    },
+    async ({ site_id, frontend, backend, phpini, confirm, dry_run }) => {
+      try {
+        const payload = { frontend, backend, phpini };
+        const summary = {
+          frontend_bytes: frontend.length,
+          backend_bytes: backend.length,
+          phpini_bytes: phpini.length,
+          frontend_preview: frontend.slice(0, 200),
+          backend_preview: backend.slice(0, 200),
+          phpini_preview: phpini.slice(0, 200),
+        };
+        const g = writeGuard(
+          { confirm, dry_run },
+          `PUT /api/sites/${site_id}/configuration`,
+          summary,
+        );
+        if (g.kind === "dry") return g.result;
+        logWrite(`PUT /api/sites/${site_id}/configuration`, {
+          frontend_bytes: frontend.length,
+          backend_bytes: backend.length,
+          phpini_bytes: phpini.length,
+        });
+        const data = await client.put(`/api/sites/${site_id}/configuration`, payload);
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
     "site_backend_update",
     "Update backend settings of an existing site: PHP version, handler (php_fpm/fcgi), app file, port, socket path, env vars. Maps to PUT /api/sites/backend/{site_id}. WRITE — confirm:true required. Use site_get(id) first to see current backend config.",
     {

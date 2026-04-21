@@ -14,8 +14,8 @@ Lets you ask an LLM things like:
 
 ## Features
 
-- 11 read tools (sites, databases, users, DNS zones & records, certificates, system load, task queue)
-- 6 write tools (create user / database / site / LE certificate, attach existing SSL, update site backend)
+- 12 read tools (sites, databases, users, DNS zones & records, certificates, system load, task queue, raw nginx/apache/php.ini configs)
+- 7 write tools (create user / database / site / LE certificate, attach existing SSL, update site backend, replace nginx/apache/php.ini configs)
 - Dual-token model: separate read-only and write tokens; write operations fail-closed if no write token is provided
 - Every write tool requires explicit `confirm: true`, and supports `dry_run: true` for previewing payloads
 - Compact response mode to avoid overflowing LLM context on large sites lists
@@ -119,6 +119,7 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `dns_domains_list` | `GET /api/dns/domains` | DNS zones |
 | `dns_records_list` | `GET /api/dns/domain/{id}/records` | Records for a zone |
 | `certificates_list` | `GET /api/certificates` | All stored SSL certs (LE + custom) |
+| `site_configuration_get` | `GET /api/sites/{id}/configuration` | Raw nginx (frontend), apache (backend) and php.ini for the site |
 | `system_load` | `GET /api/loads/full` | CPU / memory / disk / load averages / top processes |
 | `queue_list` | `GET /api/queue/list` | Background tasks including completed |
 | `queue_active` | `GET /api/queue` | Only in-flight tasks — use to poll async ops |
@@ -134,6 +135,7 @@ All write tools require `confirm: true`. Pass `dry_run: true` first to see the e
 | `site_create` | `POST /api/master/domain` + `PUT /api/master` | Create a site with optional inline user / DB / FTP |
 | `site_ssl_update` | `PUT /api/sites/{id}` | Attach / detach an SSL cert, toggle HTTPS flags |
 | `site_backend_update` | `PUT /api/sites/backend/{id}` | Change PHP version, handler, port, socket |
+| `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace nginx/apache/php.ini config. ⚠ bad syntax can break the site |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new LE certificate for a site (async — poll `queue_active`) |
 
 ## Typical flows
@@ -157,6 +159,14 @@ site_create(domain="foo.example.com", owner_id=2, php_version="84", database={..
 site_create(...)
   → certificate_create_letsencrypt(site_id=<new>, email, common_name)
   → queue_active  # poll until LE job reaches SUCCESS
+```
+
+**Harden the default nginx config (block `.git`, `.env`, `.htaccess`, etc.):**
+
+```
+site_configuration_get(site_id)
+  # LLM inserts security location blocks into frontend
+site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpini=<unchanged>)
 ```
 
 ## Safety model
