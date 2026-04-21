@@ -1,31 +1,58 @@
 # fastpanel-mcp
 
-An [MCP](https://modelcontextprotocol.io/) server for [FastPanel 2](https://fastpanel.direct/) — expose site, database, DNS, user, certificate and queue management to LLM clients (Claude Code, Claude Desktop, Cursor, etc.) through the Model Context Protocol.
+> Talk to your [FastPanel 2](https://fastpanel.direct/) server from Claude, Cursor, or any MCP-compatible client. Create sites, provision databases, attach SSL, harden nginx configs — through natural language, with production-grade safety rails.
 
-Lets you ask an LLM things like:
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
+[![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io/)
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-> *"What sites are running on this server and how much disk does each use?"*
+**Keywords:** FastPanel, MCP, Model Context Protocol, Claude Code, Claude Desktop, server management, hosting automation, nginx, Let's Encrypt, DevOps, LLM ops, AI sysadmin.
+
+---
+
+## What you get
+
+Ask an LLM, get real infra changes on your FastPanel server:
+
+> **You:** "Create a new site `foo.example.com` under user `www-root`, PHP 8.4, no database, and attach our wildcard SSL cert. Also enable HTTP/2 and HTTP/3."
 >
-> *"Create a new site `foo.example.com` under user `bar`, with a MySQL database, and attach our existing wildcard SSL cert."*
->
-> *"Any failed background tasks in the FastPanel queue in the last hour?"*
+> **LLM (~30 seconds, 5 tool calls later):** Site id 53 is live at https://foo.example.com with HTTP/2, HTTP/3, wildcard TLS, and an auto-provisioned HTTPS redirect.
 
-> **Status:** alpha, unofficial, not affiliated with FastPanel. API endpoints and payload shapes were reverse-engineered from the panel's Angular SPA — they may change between FastPanel releases.
+> **You:** "Show me the nginx config for site 1 — check if it blocks `.env`, `.git`, and other sensitive paths. If not, add hardening."
+>
+> **LLM:** Reads the config, notes that `.env` and `.htaccess` are served as static files (security gap), edits the frontend to add deny rules for dotfiles + sensitive extensions + framework files, previews the diff via `dry_run`, then deploys it. `.env` now returns 404; `.well-known/acme-challenge` still works.
+
+> **You:** "What sites are running on this server, who owns them, and which ones don't force HTTPS?"
+>
+> **LLM:** Queries `sites_list` and reports the 5 sites without `https_redirect: true`.
 
 ## Features
 
-- 12 read tools (sites, databases, users, DNS zones & records, certificates, system load, task queue, raw nginx/apache/php.ini configs)
-- 7 write tools (create user / database / site / LE certificate, attach existing SSL, update site backend, replace nginx/apache/php.ini configs)
-- Dual-token model: separate read-only and write tokens; write operations fail-closed if no write token is provided
-- Every write tool requires explicit `confirm: true`, and supports `dry_run: true` for previewing payloads
-- Compact response mode to avoid overflowing LLM context on large sites lists
-- Passwords redacted in dry-run output and stderr logs
+- **19 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, and raw nginx/apache/php.ini configs.
+- **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
+- **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
+- **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
+- **Compact response mode** on sites_list to avoid overflowing LLM context on large panels.
+- **stderr audit log** for every executed write, with passwords redacted.
+- **Tested against a live FastPanel 2 panel** with 38 sites in production.
+
+## Why this exists
+
+FastPanel publishes no OpenAPI spec. The endpoints and payload shapes in this server were reverse-engineered from the panel's Angular SPA bundle and live DevTools captures, including non-obvious quirks like:
+
+- List endpoints require `filter[limit]=…&filter[type]=…` wrapped params — bare `?limit=…` is silently ignored.
+- Site creation is a two-step wizard (`POST /api/master/domain` probe → `PUT /api/master`), not a conventional `POST /api/sites`.
+- The `backend` field in site configuration is PHP-FPM pool config when `handler=php_fpm`, but an Apache VirtualHost block when `handler=fcgi`.
+- SSL attach/detach flows through `PUT /api/sites/{id}` (site-side) not `POST /api/sites/{id}/certificate` (there is no such endpoint).
+
+These are documented in the tool descriptions so the LLM doesn't have to rediscover them.
 
 ## Requirements
 
 - Node.js 20 or newer
-- A FastPanel 2 installation you can reach over HTTPS
-- At least one FastPanel API token (see below)
+- A FastPanel 2 installation reachable over HTTPS
+- Root SSH on the panel host to create API tokens (one-time)
 
 ## Install
 
@@ -38,28 +65,34 @@ pnpm build
 
 ## Get API tokens
 
-On the FastPanel host (needs root), create a read-only token:
+On the FastPanel host, create a read-only token for day-to-day use:
 
 ```bash
 fastpanel users tokens add -n mcp-read -s read_only -e 2026-12-31
 ```
 
-That prints a JSON blob — copy the `msg` field; that's your token.
+Copy the `msg` field from the returned JSON — that's your token. It bypasses 2FA and survives session TTLs, so treat it as a server credential.
 
-For write operations, create a second full-access token. Lock it to your IP and give it a short expiry:
+Optional write token, with short expiry and IP lock:
 
 ```bash
 fastpanel users tokens add -n mcp-write -c <your-ip> -e 2026-05-31
 ```
 
-Tokens survive session TTLs and bypass the panel's 2FA — treat them as server credentials.
+Leave `FASTPANEL_WRITE_TOKEN` unset in configs where you don't need writes.
 
 ## Configure
 
 ```bash
 cp .env.example .env
-# fill in FASTPANEL_URL, FASTPANEL_TOKEN
-# leave FASTPANEL_WRITE_TOKEN unset unless you actively need writes
+```
+
+Minimum viable `.env`:
+
+```
+FASTPANEL_URL=https://panel.example.com:8888
+FASTPANEL_TOKEN=<your read token>
+FASTPANEL_INSECURE_TLS=1   # only if panel uses self-signed cert
 ```
 
 ## Use with Claude Code
@@ -68,12 +101,16 @@ cp .env.example .env
 claude mcp add fastpanel \
   -s user \
   -e "FASTPANEL_URL=https://panel.example.com:8888" \
-  -e "FASTPANEL_TOKEN=<your read token>" \
+  -e "FASTPANEL_TOKEN=…" \
   -e "FASTPANEL_INSECURE_TLS=1" \
   -- node $PWD/dist/index.js
 ```
 
-For Claude Desktop / other MCP clients, point them at `node /absolute/path/to/dist/index.js` with the same env vars. Example `claude_desktop_config.json`:
+Add `-e "FASTPANEL_WRITE_TOKEN=…"` when you want write tools enabled.
+
+## Use with Claude Desktop / Cursor / other MCP clients
+
+`claude_desktop_config.json` (or equivalent):
 
 ```json
 {
@@ -91,15 +128,15 @@ For Claude Desktop / other MCP clients, point them at `node /absolute/path/to/di
 }
 ```
 
-## Debug locally
+## Debug
 
-MCP Inspector gives you a GUI to poke at each tool:
+Inspect tools with the MCP Inspector GUI:
 
 ```bash
 pnpm inspect
 ```
 
-Or drive JSON-RPC over stdio with the included smoke script:
+Drive JSON-RPC over stdio manually:
 
 ```bash
 FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
@@ -107,61 +144,53 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 
 ## Tools
 
-### Read
+### Read (no write token required)
 
 | Tool | Endpoint | Returns |
 |---|---|---|
-| `sites_list` | `GET /api/sites/list` | All websites (compact mode by default — 13 fields per site) |
+| `sites_list` | `GET /api/sites/list` | All websites, 13 essential fields by default (compact mode) |
 | `site_get` | `GET /api/sites/{id}` | Full 40-field site object (cert, backend, backups, stats) |
+| `site_configuration_get` | `GET /api/sites/{id}/configuration` | Raw nginx (frontend), handler backend (PHP-FPM or Apache), php.ini |
 | `databases_list` | `GET /api/databases` | MySQL + PostgreSQL databases with owners and sizes |
-| `database_servers_list` | `GET /api/databases/servers` | Available DB servers (use ids in `database_create`) |
-| `users_list` | `GET /api/users` | Panel users / site owners |
-| `dns_domains_list` | `GET /api/dns/domains` | DNS zones |
-| `dns_records_list` | `GET /api/dns/domain/{id}/records` | Records for a zone |
-| `certificates_list` | `GET /api/certificates` | All stored SSL certs (LE + custom) |
-| `site_configuration_get` | `GET /api/sites/{id}/configuration` | Raw nginx (frontend), apache (backend) and php.ini for the site |
+| `database_servers_list` | `GET /api/databases/servers` | Available DB servers — use ids in `database_create` |
+| `users_list` | `GET /api/users` | Panel users and site owners |
+| `dns_domains_list` | `GET /api/dns/domains` | DNS zones (empty if panel DNS is off) |
+| `dns_records_list` | `GET /api/dns/domain/{id}/records` | Records for one zone |
+| `certificates_list` | `GET /api/certificates` | Stored SSL certificates (LE + custom) |
 | `system_load` | `GET /api/loads/full` | CPU / memory / disk / load averages / top processes |
 | `queue_list` | `GET /api/queue/list` | Background tasks including completed |
-| `queue_active` | `GET /api/queue` | Only in-flight tasks — use to poll async ops |
+| `queue_active` | `GET /api/queue` | In-flight tasks only — use for polling async ops |
 
-### Write
-
-All write tools require `confirm: true`. Pass `dry_run: true` first to see the exact payload without touching the server.
+### Write (require `FASTPANEL_WRITE_TOKEN` + explicit `confirm: true`)
 
 | Tool | Endpoint | Purpose |
 |---|---|---|
-| `user_create` | `POST /api/users` | Create a new panel user / site owner |
-| `database_create` | `POST /api/databases` | Create MySQL or PostgreSQL database + DB user |
-| `site_create` | `POST /api/master/domain` + `PUT /api/master` | Create a site with optional inline user / DB / FTP |
-| `site_ssl_update` | `PUT /api/sites/{id}` | Attach / detach an SSL cert, toggle HTTPS flags |
-| `site_backend_update` | `PUT /api/sites/backend/{id}` | Change PHP version, handler, port, socket |
-| `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace nginx/apache/php.ini config. ⚠ bad syntax can break the site |
-| `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new LE certificate for a site (async — poll `queue_active`) |
+| `user_create` | `POST /api/users` | Create a new panel user (site owner) |
+| `database_create` | `POST /api/databases` | Create MySQL or PostgreSQL database with a dedicated DB user |
+| `site_create` | `POST /api/master/domain` + `PUT /api/master` | Create a site atomically, optionally with inline user / database / FTP |
+| `site_ssl_update` | `PUT /api/sites/{id}` | Attach / replace / detach an SSL certificate, toggle HTTPS / HTTP2 / HTTP3 / HSTS |
+| `site_backend_update` | `PUT /api/sites/backend/{id}` | Change PHP version, handler, port, socket, env vars |
+| `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace raw nginx/apache/php.ini for the site. **Dangerous**: bad syntax can break the site |
+| `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new Let's Encrypt certificate (async — poll `queue_active`) |
 
-## Typical flows
+## Cookbook
 
-**List everything that's running:**
-
-```
-sites_list → databases_list → system_load
-```
-
-**Provision a new test site with an existing wildcard certificate:**
+**Provision a new test site under a wildcard cert (30 seconds, no DNS/LE wait):**
 
 ```
-site_create(domain="foo.example.com", owner_id=2, php_version="84", database={...})
-  → site_ssl_update(site_id=<new>, certificate_id=<wildcard>)
+site_create(domain="foo.example.com", owner_id=2, php_version="84")
+  → site_ssl_update(site_id=<new>, certificate_id=<wildcard>, https_redirect=true, http2=true, http3=true)
 ```
 
 **Provision a production site with a fresh Let's Encrypt cert:**
 
 ```
-site_create(...)
-  → certificate_create_letsencrypt(site_id=<new>, email, common_name)
-  → queue_active  # poll until LE job reaches SUCCESS
+site_create(domain="foo.com", aliases=["www.foo.com"], owner_id=<id>, php_version="84", database={...})
+  → certificate_create_letsencrypt(site_id=<new>, email, common_name="foo.com")
+  → queue_active  # poll until LE job SUCCESS
 ```
 
-**Harden the default nginx config (block `.git`, `.env`, `.htaccess`, etc.):**
+**Harden default nginx (block `.git`, `.env`, `.htaccess`, composer.json, etc.):**
 
 ```
 site_configuration_get(site_id)
@@ -169,38 +198,51 @@ site_configuration_get(site_id)
 site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpini=<unchanged>)
 ```
 
+**Remove deprecated TLS versions:**
+
+```
+site_configuration_get(site_id)
+  # LLM replaces "ssl_protocols TLSv1.1 TLSv1.2 TLSv1.3" with "ssl_protocols TLSv1.2 TLSv1.3"
+site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpini=<unchanged>)
+```
+
 ## Safety model
 
-- Write token is optional — if `FASTPANEL_WRITE_TOKEN` isn't set, every write tool errors out before hitting the network.
-- `confirm: true` is required on every write. Tools refuse to execute without it.
-- `dry_run: true` returns the exact JSON body that would be sent, with passwords redacted (`***`), and skips the HTTP call entirely.
-- All executed write calls are logged to stderr with a redacted payload — visible in Claude Code's MCP logs.
-- There are no delete tools yet; destructive operations are left to the UI until they're deliberately added.
+- **Dual tokens.** Read token always required. Write token is optional — if `FASTPANEL_WRITE_TOKEN` isn't set, every write tool errors out before touching the network with `FastPanelWriteDisabledError`.
+- **`confirm: true`** is a required argument on every write tool. Tools refuse to execute without it — this is your last line of defence against a confused LLM.
+- **`dry_run: true`** returns the exact JSON body that would be sent, passwords redacted as `***`, and skips the HTTP call entirely.
+- **stderr audit log** records every executed write with redacted payload. In Claude Code this surfaces in MCP logs.
+- **No delete tools** yet. Destructive operations are left to the UI until they're deliberately added.
+- **IP-lock tokens** (`fastpanel users tokens add -c <ip>`) so a leaked token can't be used from elsewhere.
 
 ## Known gotchas
 
-- **`filter[...]` params:** FastPanel list endpoints (`/api/sites/list`, `/api/queue/list`) expect params wrapped as `filter[limit]=…&filter[type]=…`. Bare `?limit=…` is silently ignored.
-- **Site creation is a wizard, not a REST create:** the panel does `POST /api/master/domain` (domain probe) then `PUT /api/master` (actual create), not `POST /api/sites`. `site_create` hides this from you.
-- **Async operations:** certificate issuance, site backend updates, and some other ops return `action: "CREATING"` / `"UPDATING"` immediately and run in the background. Use `queue_active` to poll.
-- **No official OpenAPI spec:** endpoints were reverse-engineered from the SPA bundle and DevTools traces. If a new FastPanel release breaks something, please file an issue with the new payload shape.
-- **Self-signed TLS:** most panel installs use self-signed certs. Set `FASTPANEL_INSECURE_TLS=1` or put a proper cert in front.
+- **`filter[...]` params:** FastPanel list endpoints expect `filter[limit]=…&filter[type]=…`. Bare `?limit=…` is silently ignored.
+- **Site creation is a wizard, not a REST create.** The panel does `POST /api/master/domain` (probe) then `PUT /api/master` (actual create), not `POST /api/sites`. `site_create` hides this.
+- **Async operations.** Cert issuance, site backend updates, and several other ops return `action: "CREATING"` / `"UPDATING"` immediately and run in the background. Use `queue_active` to poll.
+- **No official OpenAPI spec.** Endpoints were reverse-engineered. If a new FastPanel release breaks something, please file an issue with the new payload shape.
+- **Self-signed TLS.** Most panel installs use self-signed certs. Set `FASTPANEL_INSECURE_TLS=1` or put a proper cert in front.
+- **fail2ban / rate limiting.** FastPanel ships with fail2ban and panel-level rate limiting. Test scripts that hammer the API may get your IP blocked.
 
 ## Roadmap
 
 - Delete tools (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`)
 - DNS record CRUD
 - Backup plan management (list / run / restore)
-- CLI-fallback tools over SSH for operations not exposed via REST (`transfer`, `firewall save/restore`, `panel ip_match`)
+- Email domain + mailbox management
+- Bulk operations (e.g. "apply this nginx hardening to every site")
+- CLI-fallback tools over SSH for ops not in REST (`transfer`, `firewall save/restore`, `panel ip_match`)
 - Structured MCP `outputSchema` so clients can render typed results
 - Rate-limit aware retry with exponential backoff
 
 ## Contributing
 
-Issues and PRs welcome, especially:
+Issues and PRs welcome. Especially useful:
 
-- Captured Network payloads for actions not yet covered
+- Captured DevTools Network payloads for actions not yet covered
 - Compatibility fixes for newer FastPanel versions
 - Additional DB servers / runtime types in the enum schemas
+- Screenshots / recordings of typical flows for the README
 
 ## License
 
@@ -208,4 +250,4 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Disclaimer
 
-This is a third-party project. "FastPanel" is a trademark of its respective owners and this project is not affiliated with, endorsed by, or sponsored by FastPanel. Use at your own risk; test against a non-production FastPanel instance before pointing it at anything you care about.
+This is a third-party, community project. "FastPanel" is a trademark of its respective owners. This project is not affiliated with, endorsed by, or sponsored by FastPanel. Test against a non-production FastPanel instance before pointing it at anything you care about.
