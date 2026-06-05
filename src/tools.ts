@@ -466,43 +466,71 @@ export function registerTools(
     const list = await client.get<{ data?: DbRow[] }>("/api/databases");
     const db = (list.data ?? []).find((d) => d.id === database_id);
     if (!db?.name) throw new Error(`Database ${database_id} not found in databases_list.`);
-    if (db.server && db.server.local === false) {
+    // Fail closed: only proceed when the metadata positively proves local MySQL.
+    if (db.server?.local !== true) {
       throw new Error(
-        `Database ${database_id} lives on a remote DB server — SSH dump/import only supports the local server.`,
+        `Database ${database_id} is not on a confirmed local DB server — SSH dump/import only supports the local server.`,
       );
     }
-    if (db.server?.type && db.server.type !== "mysql") {
+    if (db.server?.type !== "mysql") {
       throw new Error(
-        `Database engine '${db.server.type}' is not supported by SSH dump/import yet (MySQL only).`,
+        `Database ${database_id} engine must be mysql (got '${db.server?.type ?? "unknown"}') — SSH dump/import is MySQL-only.`,
       );
     }
     return db.name;
   };
 
+  // SSH dump/import are confined to this staging dir so an LLM-driven call can never
+  // mysqldump over /etc/* or read an arbitrary file. Configurable for non-root SSH users.
+  const SSH_STAGING_DIR = (process.env.FASTPANEL_DUMP_DIR?.trim() || "/root/fastpanel-mcp-dumps").replace(
+    /\/+$/,
+    "",
+  );
+  const assertInStaging = (p: string): string => {
+    if (!p.startsWith("/") || p.includes("..")) {
+      throw new Error(`Path must be absolute with no '..' segments: ${p}`);
+    }
+    if (p !== SSH_STAGING_DIR && !p.startsWith(SSH_STAGING_DIR + "/")) {
+      throw new Error(
+        `Path must be inside the staging dir ${SSH_STAGING_DIR} (set FASTPANEL_DUMP_DIR to change it).`,
+      );
+    }
+    if (!p.endsWith(".sql")) throw new Error("Path must end with .sql");
+    return p;
+  };
+
   server.tool(
     "database_dump",
-    "Dump a database to a .sql file ON the FastPanel host via SSH (mysqldump). Non-destructive — reads the DB and writes a file you can then download (scp/sftp). Returns the path and byte size. Targets the host's LOCAL MySQL via root socket auth; remote DB servers and non-MySQL engines are rejected. Requires SSH configured (FASTPANEL_SSH_HOST).",
+    "Dump a database to a .sql file ON the FastPanel host via SSH (mysqldump). Writes a file you can then download (scp/sftp); returns the path and byte size. The file can only be written inside the staging dir (default /root/fastpanel-mcp-dumps, override with FASTPANEL_DUMP_DIR) — arbitrary output paths are rejected. Targets the host's LOCAL MySQL via root socket auth; remote servers and non-MySQL engines are rejected. WRITE (it creates a root-owned file) — set dry_run:true to preview, confirm:true to execute. Requires SSH configured (FASTPANEL_SSH_HOST).",
     {
       database_id: z.number().int().positive().describe("Database id from databases_list"),
       output_path: z
         .string()
         .optional()
-        .describe("Absolute path on the host for the .sql file. Default: /root/fastpanel-mcp-dumps/<name>-<timestamp>.sql"),
+        .describe("Absolute .sql path INSIDE the staging dir. Default: <staging>/<name>-<timestamp>.sql"),
+      confirm: z.boolean().default(false),
+      dry_run: z.boolean().default(false),
     },
-    async ({ database_id, output_path }) => {
+    async ({ database_id, output_path, confirm, dry_run }) => {
       try {
         const name = await resolveLocalMysqlDb(database_id);
         const ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-        const path = output_path ?? `/root/fastpanel-mcp-dumps/${name}-${ts}.sql`;
-        const dir = path.replace(/\/[^/]*$/, "") || "/";
+        const path = output_path
+          ? assertInStaging(output_path)
+          : `${SSH_STAGING_DIR}/${name}-${ts}.sql`;
+        const g = writeGuard({ confirm, dry_run }, `ssh: mysqldump ${name} > ${path}`, {
+          database: name,
+          path,
+        });
+        if (g.kind === "dry") return g.result;
+        // `mkdir -m 700 -p` only sets the mode when creating the dir; it never widens an
+        // existing directory's permissions, so a pre-existing system dir can't be DoS'd.
         const remote =
-          `mkdir -p ${shq(dir)} && chmod 700 ${shq(dir)} && ` +
+          `mkdir -m 700 -p ${shq(SSH_STAGING_DIR)} && ` +
           `mysqldump ${shq(name)} > ${shq(path)} && wc -c < ${shq(path)}`;
         logWrite("ssh mysqldump", { database: name, path });
         const res = await ssh.exec(remote);
-        if (res.code !== 0) {
-          throw new Error(`mysqldump failed (exit ${res.code}): ${res.stderr.trim() || res.stdout.trim()}`);
-        }
+        if (res.code !== 0) throw new Error(`mysqldump failed (exit ${res.code})`);
         const bytes = parseInt(res.stdout.trim(), 10) || null;
         return asJsonText({
           database: name,
@@ -518,31 +546,31 @@ export function registerTools(
 
   server.tool(
     "database_import",
-    "Load a .sql dump file (already present on the host) INTO a database via SSH (mysql). DESTRUCTIVE: the SQL runs as-is, so a dump containing DROP/CREATE will replace existing tables and data. Targets the local MySQL via root socket auth. Tip: upload the file first (scp) or produce it with database_dump. WRITE — set dry_run:true to preview the command, confirm:true to execute. Requires SSH configured (FASTPANEL_SSH_HOST).",
+    "Load a .sql dump file (already present on the host) INTO a database via SSH (mysql). DESTRUCTIVE: the SQL runs as-is, so a dump containing DROP/CREATE will replace existing tables and data. The source file must live inside the staging dir (default /root/fastpanel-mcp-dumps, override with FASTPANEL_DUMP_DIR) — paths elsewhere are rejected, so scp the file there first (or produce it with database_dump). Targets the local MySQL via root socket auth. WRITE — set dry_run:true to preview the command, confirm:true to execute. Requires SSH configured (FASTPANEL_SSH_HOST).",
     {
       database_id: z.number().int().positive().describe("Target database id from databases_list"),
-      source_path: z.string().min(1).describe("Absolute path on the host to the .sql file to load"),
+      source_path: z.string().min(1).describe("Absolute path to the .sql file, inside the staging dir"),
       confirm: z.boolean().default(false),
       dry_run: z.boolean().default(false),
     },
     async ({ database_id, source_path, confirm, dry_run }) => {
       try {
         const name = await resolveLocalMysqlDb(database_id);
+        const src = assertInStaging(source_path);
         const g = writeGuard(
           { confirm, dry_run },
-          `ssh: mysql ${name} < ${source_path}`,
-          { database: name, source_path, warning: "Runs the SQL as-is; may DROP/replace existing data." },
+          `ssh: mysql ${name} < ${src}`,
+          { database: name, source_path: src, warning: "Runs the SQL as-is; may DROP/replace existing data." },
         );
         if (g.kind === "dry") return g.result;
-        const remote = `test -f ${shq(source_path)} && mysql ${shq(name)} < ${shq(source_path)}`;
-        logWrite("ssh mysql import", { database: name, source_path });
+        const remote = `test -f ${shq(src)} && mysql ${shq(name)} < ${shq(src)}`;
+        logWrite("ssh mysql import", { database: name, source_path: src });
         const res = await ssh.exec(remote);
+        // Do not echo remote stderr — it could surface file contents on a malformed source.
         if (res.code !== 0) {
-          throw new Error(
-            `import failed (exit ${res.code}): ${res.stderr.trim() || "source file not found or mysql error"}`,
-          );
+          throw new Error(`import failed (exit ${res.code}) — check the source file exists and is valid SQL.`);
         }
-        return asJsonText({ database: name, source_path, status: "imported" });
+        return asJsonText({ database: name, source_path: src, status: "imported" });
       } catch (err) {
         return asError(err);
       }

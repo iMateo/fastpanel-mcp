@@ -187,8 +187,10 @@ These do what the REST API can't — they run on the panel host itself. Opt-in a
 |---|---|---|
 | `nginx_validate` | `nginx -t` | Validate the live nginx config before/after `site_configuration_update` — catch syntax errors before they take nginx down |
 | `site_doctor` | `stat` / `systemctl` / `nginx -t` | Diagnose why a site errors: missing docroot, a parent dir without `o+x` (the 750 → 404 trap), missing FPM socket, dead backend, broken nginx config |
-| `database_dump` | `mysqldump` | Dump a database to a `.sql` file on the host (local MySQL). Non-destructive |
-| `database_import` | `mysql` | Load a `.sql` file on the host into a database. **Destructive** — needs `confirm: true` |
+| `database_dump` | `mysqldump` | Dump a database to a `.sql` file in the staging dir (local MySQL). Writes a root-owned file — needs `confirm: true` |
+| `database_import` | `mysql` | Load a `.sql` file (from the staging dir) into a database. **Destructive** — needs `confirm: true` |
+
+Dump/import paths are confined to a staging dir (default `/root/fastpanel-mcp-dumps`, override with `FASTPANEL_DUMP_DIR`); paths outside it or containing `..` are rejected.
 
 ## Cookbook
 
