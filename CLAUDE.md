@@ -69,7 +69,7 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 1. Add a `server.tool(...)` block in `tools.ts` (read tools near the top, write tools below the divider comment).
 2. Reads call `client.get()`; writes call `client.post/put/patch/delete()`, take `confirm`+`dry_run`, and go through `writeGuard()`.
 3. Encode any non-obvious API behavior in the tool's `description` string — that text is the LLM's only documentation at runtime.
-4. Keep the `README.md` tool tables and the tool count (currently 27) in sync.
+4. Keep the `README.md` tool tables and the tool count (currently 29) in sync.
 5. `pnpm build && pnpm typecheck`, then smoke-test against a panel if it's a read tool.
 
 ## Project conventions

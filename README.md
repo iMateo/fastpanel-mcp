@@ -29,7 +29,7 @@ Ask an LLM, get real infra changes on your FastPanel server:
 
 ## Features
 
-- **27 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, and raw nginx/apache/php.ini configs.
+- **29 tools** covering sites, databases (incl. SSH dump/import), users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, and raw nginx/apache/php.ini configs.
 - **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
 - **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
@@ -187,6 +187,8 @@ These do what the REST API can't — they run on the panel host itself. Opt-in a
 |---|---|---|
 | `nginx_validate` | `nginx -t` | Validate the live nginx config before/after `site_configuration_update` — catch syntax errors before they take nginx down |
 | `site_doctor` | `stat` / `systemctl` / `nginx -t` | Diagnose why a site errors: missing docroot, a parent dir without `o+x` (the 750 → 404 trap), missing FPM socket, dead backend, broken nginx config |
+| `database_dump` | `mysqldump` | Dump a database to a `.sql` file on the host (local MySQL). Non-destructive |
+| `database_import` | `mysql` | Load a `.sql` file on the host into a database. **Destructive** — needs `confirm: true` |
 
 ## Cookbook
 

@@ -461,6 +461,94 @@ export function registerTools(
     },
   );
 
+  type DbRow = { id?: number; name?: string; server?: { local?: boolean; type?: string } };
+  const resolveLocalMysqlDb = async (database_id: number): Promise<string> => {
+    const list = await client.get<{ data?: DbRow[] }>("/api/databases");
+    const db = (list.data ?? []).find((d) => d.id === database_id);
+    if (!db?.name) throw new Error(`Database ${database_id} not found in databases_list.`);
+    if (db.server && db.server.local === false) {
+      throw new Error(
+        `Database ${database_id} lives on a remote DB server — SSH dump/import only supports the local server.`,
+      );
+    }
+    if (db.server?.type && db.server.type !== "mysql") {
+      throw new Error(
+        `Database engine '${db.server.type}' is not supported by SSH dump/import yet (MySQL only).`,
+      );
+    }
+    return db.name;
+  };
+
+  server.tool(
+    "database_dump",
+    "Dump a database to a .sql file ON the FastPanel host via SSH (mysqldump). Non-destructive — reads the DB and writes a file you can then download (scp/sftp). Returns the path and byte size. Targets the host's LOCAL MySQL via root socket auth; remote DB servers and non-MySQL engines are rejected. Requires SSH configured (FASTPANEL_SSH_HOST).",
+    {
+      database_id: z.number().int().positive().describe("Database id from databases_list"),
+      output_path: z
+        .string()
+        .optional()
+        .describe("Absolute path on the host for the .sql file. Default: /root/fastpanel-mcp-dumps/<name>-<timestamp>.sql"),
+    },
+    async ({ database_id, output_path }) => {
+      try {
+        const name = await resolveLocalMysqlDb(database_id);
+        const ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+        const path = output_path ?? `/root/fastpanel-mcp-dumps/${name}-${ts}.sql`;
+        const dir = path.replace(/\/[^/]*$/, "") || "/";
+        const remote =
+          `mkdir -p ${shq(dir)} && chmod 700 ${shq(dir)} && ` +
+          `mysqldump ${shq(name)} > ${shq(path)} && wc -c < ${shq(path)}`;
+        logWrite("ssh mysqldump", { database: name, path });
+        const res = await ssh.exec(remote);
+        if (res.code !== 0) {
+          throw new Error(`mysqldump failed (exit ${res.code}): ${res.stderr.trim() || res.stdout.trim()}`);
+        }
+        const bytes = parseInt(res.stdout.trim(), 10) || null;
+        return asJsonText({
+          database: name,
+          path,
+          bytes,
+          note: "File is on the panel host in a 0700 dir. Download via scp/sftp, then remove it when done.",
+        });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "database_import",
+    "Load a .sql dump file (already present on the host) INTO a database via SSH (mysql). DESTRUCTIVE: the SQL runs as-is, so a dump containing DROP/CREATE will replace existing tables and data. Targets the local MySQL via root socket auth. Tip: upload the file first (scp) or produce it with database_dump. WRITE — set dry_run:true to preview the command, confirm:true to execute. Requires SSH configured (FASTPANEL_SSH_HOST).",
+    {
+      database_id: z.number().int().positive().describe("Target database id from databases_list"),
+      source_path: z.string().min(1).describe("Absolute path on the host to the .sql file to load"),
+      confirm: z.boolean().default(false),
+      dry_run: z.boolean().default(false),
+    },
+    async ({ database_id, source_path, confirm, dry_run }) => {
+      try {
+        const name = await resolveLocalMysqlDb(database_id);
+        const g = writeGuard(
+          { confirm, dry_run },
+          `ssh: mysql ${name} < ${source_path}`,
+          { database: name, source_path, warning: "Runs the SQL as-is; may DROP/replace existing data." },
+        );
+        if (g.kind === "dry") return g.result;
+        const remote = `test -f ${shq(source_path)} && mysql ${shq(name)} < ${shq(source_path)}`;
+        logWrite("ssh mysql import", { database: name, source_path });
+        const res = await ssh.exec(remote);
+        if (res.code !== 0) {
+          throw new Error(
+            `import failed (exit ${res.code}): ${res.stderr.trim() || "source file not found or mysql error"}`,
+          );
+        }
+        return asJsonText({ database: name, source_path, status: "imported" });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
   // ──────────────────────────────────────────────────────────────────────────
   // WRITE TOOLS — each requires confirm:true, supports dry_run:true
   // ──────────────────────────────────────────────────────────────────────────
