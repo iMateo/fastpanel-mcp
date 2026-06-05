@@ -29,7 +29,7 @@ Ask an LLM, get real infra changes on your FastPanel server:
 
 ## Features
 
-- **21 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, site logs, and raw nginx/apache/php.ini configs.
+- **25 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, and raw nginx/apache/php.ini configs.
 - **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
 - **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
@@ -161,6 +161,10 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `queue_list` | `GET /api/queue/list` | Background tasks including completed |
 | `queue_active` | `GET /api/queue` | In-flight tasks only (filters finished) + `meta.all_done` for deterministic polling |
 | `site_logs` | `GET /api/sites/{id}/log/{lines}/{type}` | Tail nginx/apache access or error log (frontend_/backend_) without SSH |
+| `site_resources` | `GET /api/sites/{id}/resources` | Databases, sub-domains, DNS & email zones attached to a site |
+| `backup_plans_list` | `GET /api/v2/backup/plans` | Configured backup plans |
+| `me` | `GET /api/me` | Account behind the current read token (username, roles, ssh) |
+| `settings_get` | `GET /api/settings` | Panel-wide settings (OS, license, limits, notifications) |
 
 ### Write (require `FASTPANEL_WRITE_TOKEN` + explicit `confirm: true`)
 

@@ -315,6 +315,62 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
     },
   );
 
+  server.tool(
+    "site_resources",
+    "List the resources attached to a site — linked databases, sub-domains, DNS zones and email domains. Maps to GET /api/sites/{site_id}/resources. Handy before deleting or migrating a site, or to find which database(s) belong to it.",
+    { site_id: z.number().int().positive().describe("Site id from sites_list") },
+    async ({ site_id }) => {
+      try {
+        const data = await client.get(`/api/sites/${site_id}/resources`);
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "backup_plans_list",
+    "List configured backup plans (FastPanel v2 backup system). Maps to GET /api/v2/backup/plans. Empty data array means no backup plans are configured.",
+    {},
+    async () => {
+      try {
+        const data = await client.get("/api/v2/backup/plans");
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "me",
+    "Identify the FastPanel account behind the current READ token — username, roles, home dir, ssh access. Maps to GET /api/me. Use to confirm which user/token the server is authenticated as. NOTE: this always reflects the read token; it does not tell you whether a write token is configured.",
+    {},
+    async () => {
+      try {
+        const data = await client.get("/api/me");
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "settings_get",
+    "Read panel-wide settings — OS release, license type, upload limit, email notification config, statistics toggles, etc. Maps to GET /api/settings.",
+    {},
+    async () => {
+      try {
+        const data = await client.get("/api/settings");
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
   // ──────────────────────────────────────────────────────────────────────────
   // WRITE TOOLS — each requires confirm:true, supports dry_run:true
   // ──────────────────────────────────────────────────────────────────────────
