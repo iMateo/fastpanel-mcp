@@ -281,6 +281,40 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
     },
   );
 
+  server.tool(
+    "site_logs",
+    "Tail a site's nginx/apache access or error log — no SSH needed. Maps to GET /api/sites/{site_id}/log/{lines}/{type}. " +
+      "Use type=frontend_error to debug 404/permission/realpath problems (nginx), backend_error for PHP-FPM/Apache app errors. " +
+      "FastPanel quirk: this endpoint returns the log tail inside an 'errors' JSON field and responds with HTTP 400 even on success — an empty log shows as '\\n', a missing file shows a 'Path … not exists' message. This tool normalises that: the log text is always returned under `log`, and 400 is not treated as a failure. Log files live at <user_home>/data/logs/<domain>-<type>.log.",
+    {
+      site_id: z.number().int().positive().describe("Site id from sites_list"),
+      type: z
+        .enum(["frontend_access", "frontend_error", "backend_access", "backend_error"])
+        .default("frontend_error")
+        .describe("frontend_* = nginx, backend_* = PHP-FPM/Apache; *_error for diagnostics, *_access for traffic"),
+      lines: z.number().int().positive().max(5000).default(100).describe("Number of trailing lines to return"),
+    },
+    async ({ site_id, type, lines }) => {
+      const path = `/api/sites/${site_id}/log/${lines}/${type}`;
+      const normalise = (body: unknown) => {
+        const text =
+          body && typeof body === "object" && "errors" in body
+            ? (body as { errors?: unknown }).errors
+            : body;
+        return asJsonText({ site_id, type, lines, log: text });
+      };
+      try {
+        return normalise(await client.get(path));
+      } catch (err) {
+        // FastPanel returns 400 + {errors:"<log tail>"} even when the read succeeded.
+        if (err instanceof FastPanelError && err.status === 400) {
+          return normalise(err.body);
+        }
+        return asError(err);
+      }
+    },
+  );
+
   // ──────────────────────────────────────────────────────────────────────────
   // WRITE TOOLS — each requires confirm:true, supports dry_run:true
   // ──────────────────────────────────────────────────────────────────────────

@@ -55,6 +55,8 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 - **SSL attach/detach goes through the site, not a cert endpoint:** `PUT /api/sites/{id}` with a `certificate` field (`null` to detach). There is no `POST /api/sites/{id}/certificate`.
 - **The `backend` field in site configuration is polymorphic:** a PHP-FPM pool config when `handler=php_fpm`, an Apache VirtualHost block when `handler=fcgi`.
 - **Several ops are async:** cert issuance (`certificate_create_letsencrypt`) and backend updates return immediately with `CREATING`/`UPDATING`. Poll `queue_active` to track them.
+- **Log tailing is `GET /api/sites/{id}/log/{lines}/{type}`** (type ∈ `frontend_access`/`frontend_error`/`backend_access`/`backend_error`). Quirk: it returns the log tail in an `errors` JSON field with **HTTP 400 even on success** (empty log = `"\n"`, missing file = a `Path … not exists` message). `site_logs` normalises this. Files live at `<user_home>/data/logs/<domain>-<type>.log`.
+- **The API is split into lazy-loaded Angular chunks.** Only core routes (sites, users, queue) are in `main-es2015.*.js`; databases/dns/certs/logs/backup live in numbered chunks (`{id}-es2015.{hash}.js`) whose hashes are mapped in `runtime-es2015.*.js`. To reverse-engineer a new endpoint: download the chunks, grep for `` `/api/… ``. Discovered but not yet wrapped: DB dump/restore (`GET /api/databases/{id}/dump?access_token=…` download, `POST /api/databases/{id}/dump/upload?file=…` then `POST /api/databases/{id}/dump`), v2 backup plans (`/api/v2/backup/plans…`), site delete (`/api/sites/{id}/delete`), backend lifecycle (`/api/sites/backend/{id}/restart|start|stop|enable|disable`).
 - **PHP versions are dotless enums:** `"74"`, `"80"`, `"82"`, `"83"`, `"84"`.
 - **Backend updates use the backend id, not the site id:** `PUT /api/sites/backend/{backend_id}` where `backend_id = main_backend.id` from `site_get` — passing a site id 404s. `site_backend_update` takes a site id and resolves the backend id internally.
 - **Document root lives on the site, not the backend:** nginx renders `root` from `site.index_dir`. `site_backend_update` does NOT change it; `site_update` (PUT `/api/sites/{id}`) does. The `index_dir` write path is reverse-engineered and unverified — see the tool's warning.
@@ -65,7 +67,7 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 1. Add a `server.tool(...)` block in `tools.ts` (read tools near the top, write tools below the divider comment).
 2. Reads call `client.get()`; writes call `client.post/put/patch/delete()`, take `confirm`+`dry_run`, and go through `writeGuard()`.
 3. Encode any non-obvious API behavior in the tool's `description` string — that text is the LLM's only documentation at runtime.
-4. Keep the `README.md` tool tables and the tool count (currently 20) in sync.
+4. Keep the `README.md` tool tables and the tool count (currently 21) in sync.
 5. `pnpm build && pnpm typecheck`, then smoke-test against a panel if it's a read tool.
 
 ## Project conventions
