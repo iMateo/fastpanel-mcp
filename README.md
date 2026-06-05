@@ -29,7 +29,7 @@ Ask an LLM, get real infra changes on your FastPanel server:
 
 ## Features
 
-- **25 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, and raw nginx/apache/php.ini configs.
+- **27 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, and raw nginx/apache/php.ini configs.
 - **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
 - **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
@@ -178,6 +178,15 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `site_backend_update` | `PUT /api/sites/backend/{backend_id}` | Change PHP version, handler, port, socket, env vars (pass site id — backend id resolved internally) |
 | `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace raw nginx/apache/php.ini for the site. **Dangerous**: bad syntax can break the site |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new Let's Encrypt certificate (async — poll `queue_active`) |
+
+### SSH-backed (require `FASTPANEL_SSH_HOST`)
+
+These do what the REST API can't — they run on the panel host itself. Opt-in and host-agnostic: set `FASTPANEL_SSH_HOST` (+ optional `FASTPANEL_SSH_USER`/`PORT`/`KEY`) to point at **any** FastPanel server. The server shells out to your own `ssh` client, so the host just needs to be reachable with key-based auth. Both tools below are read-only.
+
+| Tool | Runs | Purpose |
+|---|---|---|
+| `nginx_validate` | `nginx -t` | Validate the live nginx config before/after `site_configuration_update` — catch syntax errors before they take nginx down |
+| `site_doctor` | `stat` / `systemctl` / `nginx -t` | Diagnose why a site errors: missing docroot, a parent dir without `o+x` (the 750 → 404 trap), missing FPM socket, dead backend, broken nginx config |
 
 ## Cookbook
 

@@ -2,6 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { FastPanelClient } from "./client.js";
 import { FastPanelError } from "./client.js";
+import type { SshClient } from "./ssh.js";
+import { shq } from "./ssh.js";
 
 function asJsonText(data: unknown) {
   return {
@@ -64,7 +66,11 @@ function redactPasswords(obj: unknown): unknown {
   return out;
 }
 
-export function registerTools(server: McpServer, client: FastPanelClient): void {
+export function registerTools(
+  server: McpServer,
+  client: FastPanelClient,
+  ssh: SshClient,
+): void {
   // ──────────────────────────────────────────────────────────────────────────
   // READ TOOLS
   // ──────────────────────────────────────────────────────────────────────────
@@ -372,6 +378,90 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
   );
 
   // ──────────────────────────────────────────────────────────────────────────
+  // SSH-BACKED TOOLS — require FASTPANEL_SSH_HOST; run on the panel host itself
+  // ──────────────────────────────────────────────────────────────────────────
+
+  server.tool(
+    "nginx_validate",
+    "Run `nginx -t` on the FastPanel host (over SSH) to validate the live nginx config — use it before and after site_configuration_update to catch syntax errors that would otherwise take nginx (and every site on it) down. Read-only: does NOT reload or modify anything. Requires SSH configured (FASTPANEL_SSH_HOST); uses your own ssh client.",
+    {},
+    async () => {
+      try {
+        const res = await ssh.exec("nginx -t 2>&1");
+        const ok = /test is successful/i.test(res.stdout);
+        return asJsonText({ ok, exit_code: res.code, output: res.stdout.trim() });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "site_doctor",
+    "Diagnose the common reasons a FastPanel site serves errors — runs host-level checks over SSH and returns a structured report. Catches the classic traps: docroot missing, a parent directory without o+x so nginx (www-data) can't traverse to the docroot (the 750 → '404 File not found' / 'permission denied' problem), missing PHP-FPM socket, dead backend service, and broken nginx config. Read-only. Requires SSH configured (FASTPANEL_SSH_HOST).",
+    { site_id: z.number().int().positive().describe("Site id from sites_list") },
+    async ({ site_id }) => {
+      try {
+        const resp = await client.get<{
+          data?: {
+            domain?: string;
+            index_dir?: string;
+            main_backend?: { socket_path?: string; service_name?: string };
+          };
+        }>(`/api/sites/${site_id}`);
+        const site = resp.data ?? {};
+        const docroot = String(site.index_dir ?? "");
+        const socket = String(site.main_backend?.socket_path ?? "");
+        const service = String(site.main_backend?.service_name ?? "");
+        if (!docroot) throw new Error(`Site ${site_id} has no index_dir to check.`);
+
+        const remote = [
+          `d=${shq(docroot)}`,
+          `sock=${shq(socket)}`,
+          `svc=${shq(service)}`,
+          `[ -d "$d" ] && echo DOCROOT_EXISTS=yes || echo DOCROOT_EXISTS=no`,
+          `echo "DOCROOT_STAT=$(stat -c '%a %U:%G' "$d" 2>/dev/null)"`,
+          `p="$d"; bad=""; while [ -n "$p" ] && [ "$p" != "/" ]; do perm=$(stat -c '%a' "$p" 2>/dev/null); last=$(printf '%s' "$perm" | tail -c1); case "$last" in 1|3|5|7) : ;; *) bad="$bad $p($perm)" ;; esac; p=$(dirname "$p"); done; echo "TRAVERSAL_BAD=$bad"`,
+          `[ -n "$sock" ] && { [ -S "$sock" ] && echo SOCKET=ok || echo SOCKET=missing; } || echo SOCKET=n/a`,
+          `[ -n "$svc" ] && echo "SERVICE=$(systemctl is-active "$svc" 2>/dev/null)" || echo SERVICE=n/a`,
+          `nginx -t >/dev/null 2>&1 && echo NGINX=ok || echo NGINX=fail`,
+        ].join("\n");
+
+        const res = await ssh.exec(remote);
+        const map: Record<string, string> = {};
+        for (const line of res.stdout.split("\n")) {
+          const i = line.indexOf("=");
+          if (i > 0) map[line.slice(0, i)] = line.slice(i + 1).trim();
+        }
+
+        const docrootExists = map.DOCROOT_EXISTS === "yes";
+        const traversalBad = (map.TRAVERSAL_BAD ?? "").trim();
+        const nginxOk = map.NGINX === "ok";
+        const checks = {
+          docroot_exists: { ok: docrootExists, path: docroot },
+          docroot_perms: { detail: map.DOCROOT_STAT || "(unknown)" },
+          path_traversal: traversalBad
+            ? {
+                ok: false,
+                detail: `nginx (www-data) cannot traverse to docroot — missing o+x on:${traversalBad}. This is the classic 750 → "404 File not found" / permission-denied cause. Fix with chmod o+x on each listed dir.`,
+              }
+            : { ok: true, detail: "every ancestor directory has o+x" },
+          fpm_socket: { detail: map.SOCKET ?? "n/a", note: "n/a is normal for php_fpm pools that listen on a port instead of a socket" },
+          backend_service: { detail: map.SERVICE ?? "n/a" },
+          nginx_config: {
+            ok: nginxOk,
+            detail: nginxOk ? "nginx -t passed" : "nginx -t FAILED — run nginx_validate for the error",
+          },
+        };
+        const overall_ok = docrootExists && !traversalBad && nginxOk;
+        return asJsonText({ site_id, domain: site.domain, overall_ok, checks });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  // ──────────────────────────────────────────────────────────────────────────
   // WRITE TOOLS — each requires confirm:true, supports dry_run:true
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -544,15 +634,18 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
     },
     async ({ site_id, index_dir, framework, index_page, confirm, dry_run }) => {
       try {
-        const site = await client.get<{
-          index_dir?: string;
-          index_page?: string;
-          https_redirect?: boolean;
-          http2?: boolean;
-          http3?: boolean;
-          hsts?: boolean;
-          certificate?: { id?: number } | null;
+        const resp = await client.get<{
+          data?: {
+            index_dir?: string;
+            index_page?: string;
+            https_redirect?: boolean;
+            http2?: boolean;
+            http3?: boolean;
+            hsts?: boolean;
+            certificate?: { id?: number } | null;
+          };
         }>(`/api/sites/${site_id}`);
+        const site = resp.data ?? {};
 
         let newDir = index_dir;
         if (!newDir && framework) {
@@ -679,9 +772,10 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
         // Partial update: fetch current config for any omitted block so we never blank one out.
         let current: { frontend?: string; backend?: string; phpini?: string } | undefined;
         if (frontend === undefined || backend === undefined || phpini === undefined) {
-          current = await client.get<{ frontend?: string; backend?: string; phpini?: string }>(
-            `/api/sites/${site_id}/configuration`,
-          );
+          const cfg = await client.get<{
+            data?: { frontend?: string; backend?: string; phpini?: string };
+          }>(`/api/sites/${site_id}/configuration`);
+          current = cfg.data ?? {};
         }
         frontend = frontend ?? current?.frontend ?? "";
         backend = backend ?? current?.backend ?? "";
@@ -739,20 +833,23 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
     },
     async ({ site_id, confirm, dry_run, ...rest }) => {
       try {
-        const site = await client.get<{
-          index_dir?: string;
-          main_backend?: {
-            id?: number;
-            type?: string;
-            handler?: string;
-            handler_version?: string;
-            app_file?: string;
-            port?: number;
-            socket_path?: string;
-            environment?: string[];
-            work_dir?: string;
+        const resp = await client.get<{
+          data?: {
+            index_dir?: string;
+            main_backend?: {
+              id?: number;
+              type?: string;
+              handler?: string;
+              handler_version?: string;
+              app_file?: string;
+              port?: number;
+              socket_path?: string;
+              environment?: string[];
+              work_dir?: string;
+            };
           };
         }>(`/api/sites/${site_id}`);
+        const site = resp.data ?? {};
         const cur = site.main_backend;
         if (!cur?.id) {
           throw new Error(

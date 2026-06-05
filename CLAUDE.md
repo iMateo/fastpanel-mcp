@@ -26,11 +26,12 @@ Always `pnpm build` before running smoke or inspect — they execute `dist/`, no
 
 ## Architecture
 
-Three layers, registered in `index.ts:main()`:
+Four layers, registered in `index.ts:main()`:
 
-- **`config.ts`** — `loadConfig()` reads env (`FASTPANEL_URL`, `FASTPANEL_TOKEN`, optional `FASTPANEL_WRITE_TOKEN`, `FASTPANEL_INSECURE_TLS`, `FASTPANEL_TIMEOUT_MS`) and throws on missing required vars. The dual-token split lives here: `writeToken` is `null` when unset.
+- **`config.ts`** — `loadConfig()` reads env (`FASTPANEL_URL`, `FASTPANEL_TOKEN`, optional `FASTPANEL_WRITE_TOKEN`, `FASTPANEL_INSECURE_TLS`, `FASTPANEL_TIMEOUT_MS`, and the optional `FASTPANEL_SSH_*` block) and throws on missing required vars. The dual-token split lives here: `writeToken` is `null` when unset; `ssh` is `null` until `FASTPANEL_SSH_HOST` is set.
 - **`client.ts`** — `FastPanelClient` wraps `undici` with one persistent `Agent`. `get()` uses the read token; `post/patch/put/delete()` set `requiresWrite:true` and use the write token, throwing `FastPanelWriteDisabledError` if it's null. `>=400` responses throw `FastPanelError` carrying status + parsed body.
-- **`tools.ts`** — `registerTools()` registers every tool. This is where all FastPanel API knowledge lives.
+- **`ssh.ts`** — `SshClient` shells out to the operator's own `ssh` (via `execFile`, no library dep, no local shell) to run commands on the panel host. Opt-in and host-agnostic — nothing about a specific server is baked in; host/user/port/key all come from `FASTPANEL_SSH_*`. `exec()` resolves with stdout/stderr/exit code (does not throw on non-zero, so callers can read e.g. `nginx -t` failures); throws `SshDisabledError` when SSH is unconfigured. Dynamic values interpolated into remote commands MUST go through `shq()`.
+- **`tools.ts`** — `registerTools(server, client, ssh)` registers every tool. This is where all FastPanel API knowledge lives.
 
 ### How a tool is built
 
@@ -51,6 +52,7 @@ Additionally: writes require the write token (enforced in the client), every exe
 These are load-bearing; they were discovered from the panel's SPA bundle and live DevTools captures, and are duplicated into tool descriptions so the LLM sees them at call time:
 
 - **List endpoints need wrapped filter params:** `filter[limit]=…&filter[type]=…`. Bare `?limit=…` is silently ignored.
+- **Single-resource GETs wrap the object in `{data: …}`:** `GET /api/sites/{id}` and `GET /api/sites/{id}/configuration` return `{data: {...}}`, not the bare object — read `resp.data.index_dir`, not `resp.index_dir`. (The log endpoint is the exception: it returns `{errors: …}` at the root.) Any tool that fetches a site to read its fields must unwrap `.data` first.
 - **Site creation is a two-step wizard, not a REST create:** `POST /api/master/domain` (probes for existing email/DNS zones) → `PUT /api/master` (creates site + optional user/db/ftp atomically). There is no `POST /api/sites`. `site_create` hides this; it bails if the probe finds pre-existing zones it can't handle.
 - **SSL attach/detach goes through the site, not a cert endpoint:** `PUT /api/sites/{id}` with a `certificate` field (`null` to detach). There is no `POST /api/sites/{id}/certificate`.
 - **The `backend` field in site configuration is polymorphic:** a PHP-FPM pool config when `handler=php_fpm`, an Apache VirtualHost block when `handler=fcgi`.
@@ -67,7 +69,7 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 1. Add a `server.tool(...)` block in `tools.ts` (read tools near the top, write tools below the divider comment).
 2. Reads call `client.get()`; writes call `client.post/put/patch/delete()`, take `confirm`+`dry_run`, and go through `writeGuard()`.
 3. Encode any non-obvious API behavior in the tool's `description` string — that text is the LLM's only documentation at runtime.
-4. Keep the `README.md` tool tables and the tool count (currently 25) in sync.
+4. Keep the `README.md` tool tables and the tool count (currently 27) in sync.
 5. `pnpm build && pnpm typecheck`, then smoke-test against a panel if it's a read tool.
 
 ## Project conventions
