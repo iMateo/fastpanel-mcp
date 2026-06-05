@@ -247,7 +247,23 @@ Issues and PRs welcome. Especially useful:
 
 ## Author
 
-Built and maintained by **Ihor Chyshkala** — [ihor@chyshkala.com](mailto:ihor@chyshkala.com).
+Built and maintained by **Ihor Chyshkala** — [chyshkala.com](https://chyshkala.com) · [ihor@chyshkala.com](mailto:ihor@chyshkala.com).
+
+### Services
+
+Available for hire via [chyshkala.com](https://chyshkala.com):
+
+| Service | What it covers |
+|---|---|
+| **Web Development** | Full-stack web apps with React, Next.js & Node.js |
+| **Process Automation** | Workflows, integrations & data pipelines |
+| **API Development** | REST, GraphQL & third-party integrations |
+| **AI Integration** | ChatGPT, Claude & custom AI solutions |
+| **AI Chatbot** _(new)_ | Custom chatbots trained on your data |
+| **DevOps** | CI/CD, Docker & cloud infrastructure |
+| **CTO-as-a-Service** | Technical leadership for startups |
+| **Due Diligence** | Technical audits for investors |
+| **Legacy Modernization** | Migrate from legacy to modern stack |
 
 ## License
 
