@@ -202,12 +202,19 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
 
   server.tool(
     "certificates_list",
-    "List all SSL certificates stored in FastPanel (Let's Encrypt and custom). Returns id, name, type, common_name, alternative_name, expiration, linked site.",
+    "List all SSL certificates stored in FastPanel (Let's Encrypt and custom). Returns id, name, type, common_name, alternative_name, expiration, linked site. Also injects computed crt_path/key_path — the on-disk paths FastPanel writes certs to (/var/www/httpd-cert/<name>.crt|.key). These are needed when hand-writing a 443 server block after a site is in manual_changes mode. NOTE: the paths are derived from FastPanel's naming convention, not returned by the API — verify on disk (ls /var/www/httpd-cert/) if a cert was imported rather than issued by the panel.",
     {},
     async () => {
       try {
-        const data = await client.get("/api/certificates");
-        return asJsonText(data);
+        const data = await client.get<{ data?: Array<Record<string, unknown>> }>(
+          "/api/certificates",
+        );
+        const enriched = (data.data ?? []).map((c) => ({
+          ...c,
+          crt_path: typeof c.name === "string" ? `/var/www/httpd-cert/${c.name}.crt` : null,
+          key_path: typeof c.name === "string" ? `/var/www/httpd-cert/${c.name}.key` : null,
+        }));
+        return asJsonText({ ...data, data: enriched });
       } catch (err) {
         return asError(err);
       }
@@ -244,12 +251,30 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
 
   server.tool(
     "queue_active",
-    "List only currently active (in-flight) FastPanel background tasks. Use this to poll progress after firing async operations like certificate_create_letsencrypt. Empty array means all jobs completed.",
-    {},
-    async () => {
+    "Poll FastPanel background tasks and get a deterministic done/not-done signal. The raw /api/queue endpoint also returns recently-FINISHED tasks (status SUCCESS/FAILED), which makes naive polling ambiguous. This tool filters to genuinely in-flight tasks by default and adds meta.all_done (true when nothing is still running) so you can loop until done. Set include_finished:true to also see the just-completed tasks (useful to learn whether an async op SUCCEEDED or FAILED).",
+    {
+      include_finished: z
+        .boolean()
+        .default(false)
+        .describe("If true, return finished tasks too (with their SUCCESS/FAILED status) instead of only in-flight ones."),
+    },
+    async ({ include_finished }) => {
       try {
-        const data = await client.get("/api/queue");
-        return asJsonText(data);
+        const data = await client.get<{ data?: Array<Record<string, unknown>> }>("/api/queue");
+        const tasks = data.data ?? [];
+        const FINISHED = new Set(["SUCCESS", "FAILED", "ERROR", "DONE", "CANCELLED"]);
+        const isFinished = (t: Record<string, unknown>) =>
+          FINISHED.has(String(t.status ?? "").toUpperCase());
+        const active = tasks.filter((t) => !isFinished(t));
+        const out = include_finished ? tasks : active;
+        return asJsonText({
+          data: out,
+          meta: {
+            active_count: active.length,
+            finished_count: tasks.length - active.length,
+            all_done: active.length === 0,
+          },
+        });
       } catch (err) {
         return asError(err);
       }
@@ -406,6 +431,73 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
   );
 
   server.tool(
+    "site_update",
+    "Change a site's document root (index_dir) and/or directory index, via PUT /api/sites/{site_id}. This is the ONLY way to repoint a site's docroot — nginx renders `root` from site.index_dir, NOT from the backend, so site_backend_update can't do it. Common need: frameworks that serve from a subfolder (Laravel/Symfony → <docroot>/public). Pass framework:'laravel' to auto-append '/public' to the current docroot without computing the path yourself. " +
+      "This tool does a read-modify-write: it fetches the current site via site_get and resends the writable fields (docroot, index page, current certificate id, https/http2/http3/hsts flags) so the partial PUT doesn't blank out SSL or flags. " +
+      "⚠️ UNVERIFIED ENDPOINT: the index_dir write path was not confirmable from the API spec (FastPanel has no OpenAPI). Run with dry_run:true, then a real call on a throwaway site, and check site_get afterwards. If index_dir does NOT change, capture the DevTools request the panel UI fires when you edit the docroot and report it so this can be corrected. WRITE — confirm:true required.",
+    {
+      site_id: z.number().int().positive().describe("Site id from sites_list"),
+      index_dir: z
+        .string()
+        .optional()
+        .describe("New absolute document root, e.g. /var/www/www-root/data/www/<domain>/public. Omit if using `framework`."),
+      framework: z
+        .enum(["laravel", "symfony"])
+        .optional()
+        .describe("Preset: sets docroot to <current_index_dir>/public. Ignored if index_dir is given explicitly."),
+      index_page: z
+        .string()
+        .optional()
+        .describe("Directory index, e.g. 'index.php index.html'. Omit to keep current."),
+      confirm: z.boolean().default(false),
+      dry_run: z.boolean().default(false),
+    },
+    async ({ site_id, index_dir, framework, index_page, confirm, dry_run }) => {
+      try {
+        const site = await client.get<{
+          index_dir?: string;
+          index_page?: string;
+          https_redirect?: boolean;
+          http2?: boolean;
+          http3?: boolean;
+          hsts?: boolean;
+          certificate?: { id?: number } | null;
+        }>(`/api/sites/${site_id}`);
+
+        let newDir = index_dir;
+        if (!newDir && framework) {
+          const base = (site.index_dir ?? "").replace(/\/+$/, "");
+          newDir = `${base}/public`;
+        }
+        if (!newDir) {
+          throw new Error("Provide either index_dir or framework — nothing to change.");
+        }
+
+        const payload: Record<string, unknown> = {
+          index_dir: newDir,
+          index_page: index_page ?? site.index_page,
+          certificate: site.certificate?.id ?? null,
+          https_redirect: site.https_redirect ?? false,
+          http2: site.http2 ?? false,
+          http3: site.http3 ?? false,
+          hsts: site.hsts ?? false,
+          manual_changes: false,
+        };
+        const g = writeGuard({ confirm, dry_run }, `PUT /api/sites/${site_id}`, {
+          previous_index_dir: site.index_dir,
+          ...payload,
+        });
+        if (g.kind === "dry") return g.result;
+        logWrite(`PUT /api/sites/${site_id}`, { index_dir: newDir, index_page: payload.index_page });
+        const data = await client.put(`/api/sites/${site_id}`, payload);
+        return asJsonText({ previous_index_dir: site.index_dir, new_index_dir: newDir, result: data });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
     "certificate_create_letsencrypt",
     "Issue a Let's Encrypt SSL certificate for an existing site. This is ASYNC — response returns immediately with status 'CREATING'. Poll queue_active to track issuance progress. REQUIREMENTS: site must be publicly accessible with correct DNS for HTTP-01 challenge to succeed. WRITE operation — confirm:true to execute.",
     {
@@ -475,23 +567,35 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
 
   server.tool(
     "site_configuration_update",
-    "Replace the nginx (frontend), apache (backend) and php.ini config for a site. DANGEROUS: invalid syntax can take down the site or the whole nginx/apache service. Recommended flow: (1) call site_configuration_get first, (2) modify only the sections you need, (3) pass ALL three strings back unchanged+edited. All three fields are REQUIRED — there is no partial update. Endpoint: PUT /api/sites/{site_id}/configuration. WRITE — confirm:true required.",
+    "Replace the nginx (frontend), apache (backend) and php.ini config for a site. DANGEROUS: invalid syntax can take down the site or the whole nginx/apache service — this tool does NOT validate nginx syntax before applying (no `nginx -t`), so preview with dry_run and double-check by hand. " +
+      "⚠️ SIDE EFFECT — manual mode: the first config update flips the site to manual_changes=true on the panel side. After that, FastPanel STOPS managing this site's config: it will no longer auto-insert the 443 server block, the HTTP→HTTPS redirect, or Let's Encrypt renewal/acme-challenge locations when you issue or renew SSL. You become responsible for the full HTTPS block (including ssl_certificate paths — get them from certificates_list crt_path/key_path). " +
+      "Partial update IS supported here (unlike the raw API): omit any of frontend/backend/phpini and the tool fetches the current value via site_configuration_get and sends it back unchanged, so you can safely change just one block. Endpoint: PUT /api/sites/{site_id}/configuration. WRITE — confirm:true required.",
     {
       site_id: z.number().int().positive().describe("Site id from sites_list"),
       frontend: z
         .string()
-        .min(1)
-        .describe("Full nginx config for this site (HTTPS server block + HTTP redirect block)"),
+        .optional()
+        .describe("Full nginx config for this site (HTTPS server block + HTTP redirect block). Omit to keep current."),
       backend: z
         .string()
-        .min(1)
-        .describe("Full apache/httpd config for this site (VirtualHost block)"),
-      phpini: z.string().describe("Full php.ini overrides for this site"),
+        .optional()
+        .describe("Full apache/httpd config for this site (VirtualHost block). Omit to keep current."),
+      phpini: z.string().optional().describe("Full php.ini overrides for this site. Omit to keep current."),
       confirm: z.boolean().default(false),
       dry_run: z.boolean().default(false),
     },
     async ({ site_id, frontend, backend, phpini, confirm, dry_run }) => {
       try {
+        // Partial update: fetch current config for any omitted block so we never blank one out.
+        let current: { frontend?: string; backend?: string; phpini?: string } | undefined;
+        if (frontend === undefined || backend === undefined || phpini === undefined) {
+          current = await client.get<{ frontend?: string; backend?: string; phpini?: string }>(
+            `/api/sites/${site_id}/configuration`,
+          );
+        }
+        frontend = frontend ?? current?.frontend ?? "";
+        backend = backend ?? current?.backend ?? "";
+        phpini = phpini ?? current?.phpini ?? "";
         const payload = { frontend, backend, phpini };
         const summary = {
           frontend_bytes: frontend.length,
@@ -522,39 +626,68 @@ export function registerTools(server: McpServer, client: FastPanelClient): void 
 
   server.tool(
     "site_backend_update",
-    "Update backend settings of an existing site: PHP version, handler (php_fpm/fcgi), app file, port, socket path, env vars. Maps to PUT /api/sites/backend/{site_id}. WRITE — confirm:true required. Use site_get(id) first to see current backend config.",
+    "Update backend settings of an existing site: PHP version, handler (php_fpm/fcgi), app file, port, socket path, env vars. Pass the SITE id (from sites_list) — this tool resolves the backend id internally (the API endpoint is PUT /api/sites/backend/{backend_id}, where backend_id = main_backend.id, NOT the site id; passing a site id there 404s). All settings except site_id are optional: omitted fields keep the site's current backend values (fetched via site_get). NOTE: this does NOT change the site's document root (site.index_dir) — nginx renders `root` from the site object, not the backend. Use site_update for docroot. WRITE — confirm:true required.",
     {
-      site_id: z.number().int().positive().describe("Site id from sites_list"),
-      type: z.enum(["php", "nodejs", "python"]).default("php").describe("Backend runtime type"),
-      handler: z.enum(["php_fpm", "fcgi"]).describe("PHP handler (only meaningful for type=php)"),
+      site_id: z.number().int().positive().describe("Site id from sites_list (backend id is resolved automatically)"),
+      type: z.enum(["php", "nodejs", "python"]).optional().describe("Backend runtime type (default: keep current)"),
+      handler: z.enum(["php_fpm", "fcgi"]).optional().describe("PHP handler (only meaningful for type=php; default: keep current)"),
       handler_version: z
         .enum(["74", "80", "81", "82", "83", "84"])
-        .describe("PHP version without dot"),
-      app_file: z.string().default("index.php").describe("Entry file"),
-      port: z.number().int().min(1024).max(65535).describe("Backend listen port"),
-      socket_path: z.string().describe("Unix socket path for the backend"),
-      index_dir: z.string().describe("Document root path, e.g. /var/www/<user>/data/www/<domain>"),
+        .optional()
+        .describe("PHP version without dot (default: keep current)"),
+      app_file: z.string().optional().describe("Entry file (default: keep current)"),
+      port: z.number().int().min(1024).max(65535).optional().describe("Backend listen port (default: keep current)"),
+      socket_path: z.string().optional().describe("Unix socket path for the backend (default: keep current)"),
       manual_changes: z
         .boolean()
         .default(false)
         .describe("Preserve manual changes to backend config"),
-      environment: z.array(z.string()).default([""]).describe("Env vars, e.g. ['KEY=val']"),
-      work_dir: z.string().default("").describe("Working directory (optional)"),
+      environment: z.array(z.string()).optional().describe("Env vars, e.g. ['KEY=val'] (default: keep current)"),
+      work_dir: z.string().optional().describe("Working directory (default: keep current)"),
       confirm: z.boolean().default(false),
       dry_run: z.boolean().default(false),
     },
     async ({ site_id, confirm, dry_run, ...rest }) => {
       try {
-        const payload = rest;
-        const g = writeGuard(
-          { confirm, dry_run },
-          `PUT /api/sites/backend/${site_id}`,
-          payload,
-        );
+        const site = await client.get<{
+          index_dir?: string;
+          main_backend?: {
+            id?: number;
+            type?: string;
+            handler?: string;
+            handler_version?: string;
+            app_file?: string;
+            port?: number;
+            socket_path?: string;
+            environment?: string[];
+            work_dir?: string;
+          };
+        }>(`/api/sites/${site_id}`);
+        const cur = site.main_backend;
+        if (!cur?.id) {
+          throw new Error(
+            `Site ${site_id} has no resolvable backend (main_backend.id missing). It may be a static site with no PHP/app backend.`,
+          );
+        }
+        const backendId = cur.id;
+        const payload = {
+          type: rest.type ?? cur.type ?? "php",
+          handler: rest.handler ?? cur.handler,
+          handler_version: rest.handler_version ?? cur.handler_version,
+          app_file: rest.app_file ?? cur.app_file ?? "index.php",
+          port: rest.port ?? cur.port,
+          socket_path: rest.socket_path ?? cur.socket_path,
+          index_dir: site.index_dir,
+          manual_changes: rest.manual_changes,
+          environment: rest.environment ?? cur.environment ?? [""],
+          work_dir: rest.work_dir ?? cur.work_dir ?? "",
+        };
+        const path = `/api/sites/backend/${backendId}`;
+        const g = writeGuard({ confirm, dry_run }, `PUT ${path}`, { backend_id: backendId, ...payload });
         if (g.kind === "dry") return g.result;
-        logWrite(`PUT /api/sites/backend/${site_id}`, payload);
-        const data = await client.put(`/api/sites/backend/${site_id}`, payload);
-        return asJsonText(data);
+        logWrite(`PUT ${path}`, payload);
+        const data = await client.put(path, payload);
+        return asJsonText({ backend_id: backendId, result: data });
       } catch (err) {
         return asError(err);
       }

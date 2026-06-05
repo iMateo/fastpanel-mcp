@@ -29,7 +29,7 @@ Ask an LLM, get real infra changes on your FastPanel server:
 
 ## Features
 
-- **19 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, and raw nginx/apache/php.ini configs.
+- **20 tools** covering sites, databases, users, DNS zones, SSL certificates, system load, queue, and raw nginx/apache/php.ini configs.
 - **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
 - **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
@@ -168,8 +168,9 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `user_create` | `POST /api/users` | Create a new panel user (site owner) |
 | `database_create` | `POST /api/databases` | Create MySQL or PostgreSQL database with a dedicated DB user |
 | `site_create` | `POST /api/master/domain` + `PUT /api/master` | Create a site atomically, optionally with inline user / database / FTP |
+| `site_update` | `PUT /api/sites/{id}` | Change document root (`index_dir`) / directory index — e.g. point a Laravel site at `public/` (`framework: "laravel"` preset) |
 | `site_ssl_update` | `PUT /api/sites/{id}` | Attach / replace / detach an SSL certificate, toggle HTTPS / HTTP2 / HTTP3 / HSTS |
-| `site_backend_update` | `PUT /api/sites/backend/{id}` | Change PHP version, handler, port, socket, env vars |
+| `site_backend_update` | `PUT /api/sites/backend/{backend_id}` | Change PHP version, handler, port, socket, env vars (pass site id — backend id resolved internally) |
 | `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace raw nginx/apache/php.ini for the site. **Dangerous**: bad syntax can break the site |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new Let's Encrypt certificate (async — poll `queue_active`) |
 
@@ -243,6 +244,10 @@ Issues and PRs welcome. Especially useful:
 - Compatibility fixes for newer FastPanel versions
 - Additional DB servers / runtime types in the enum schemas
 - Screenshots / recordings of typical flows for the README
+
+## Author
+
+Built and maintained by **Ihor Chyshkala** — [ihor@chyshkala.com](mailto:ihor@chyshkala.com).
 
 ## License
 
