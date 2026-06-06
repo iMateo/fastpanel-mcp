@@ -13,7 +13,7 @@ async function main(): Promise<void> {
 
   const server = new McpServer({
     name: "fastpanel-mcp",
-    version: "0.1.0",
+    version: "1.1.0",
   });
 
   registerTools(server, client, ssh);

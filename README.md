@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io/)
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](./CHANGELOG.md)
 
 **Keywords:** FastPanel, MCP, Model Context Protocol, Claude Code, Claude Desktop, server management, hosting automation, nginx, Let's Encrypt, DevOps, LLM ops, AI sysadmin.
 
