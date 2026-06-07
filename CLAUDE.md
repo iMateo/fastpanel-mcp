@@ -77,3 +77,4 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 - ESM throughout (`"type": "module"`); intra-`src` imports use `.js` extensions (e.g. `./config.js`) because output is ESM.
 - `sites_list` defaults to `compact:true` — the full site object is ~3KB and overflows context on large panels. Preserve compact-by-default for any list tool that returns large objects.
 - No delete tools exist yet, by design — destructive ops are left to the UI until deliberately added.
+- **`dist/` is committed** (not gitignored): the MCP runs `node dist/index.js` from a checkout, so the artifact must survive a fresh clone / `git clean`. Always `pnpm build` and commit `dist/` together with any `src/` change, or the running server goes stale.
