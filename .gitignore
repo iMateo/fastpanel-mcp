@@ -1,5 +1,6 @@
 node_modules/
-dist/
+# dist/ is committed: the MCP server runs `node dist/index.js` from a checkout,
+# so the build artifact must be present even on a fresh clone / after git clean.
 .env
 .env.local
 .env.*.local
