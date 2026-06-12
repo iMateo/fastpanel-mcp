@@ -429,6 +429,228 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
+    // Resolve a site's web root (index_dir) and the system user that must own its files.
+    // FastPanel wraps the site in {data:…}; files served by nginx/PHP-FPM must be owned by
+    // owner.username, NOT root, or the panel/serving breaks — every upload tool chowns to it.
+    const resolveSiteRoot = async (site_id) => {
+        const resp = await client.get(`/api/sites/${site_id}`);
+        const site = resp.data ?? {};
+        const root = String(site.index_dir ?? "").replace(/\/+$/, "");
+        const user = String(site.owner?.username ?? "");
+        if (!root)
+            throw new Error(`Site ${site_id} has no index_dir (web root) to upload into.`);
+        if (!user)
+            throw new Error(`Site ${site_id} has no resolvable owner.username for chown.`);
+        return { user, root };
+    };
+    // Web-path safety: a destination subpath must stay inside the site's web root and may
+    // only use web-safe characters — this also neutralises shell expansion of the remote
+    // path (rsync/git run it through the host shell) and directory-escape attempts.
+    const SAFE_SUBPATH = /^[A-Za-z0-9._/-]+$/;
+    const resolveDest = (root, subpath) => {
+        const sub = (subpath ?? "").replace(/^\/+/, "").replace(/\/+$/, "");
+        if (!sub)
+            return root;
+        if (sub.split("/").some((seg) => seg === "..")) {
+            throw new Error(`subpath must not contain '..' segments: ${subpath}`);
+        }
+        if (!SAFE_SUBPATH.test(sub)) {
+            throw new Error(`subpath may only contain letters, digits, '.', '_', '-', '/': ${subpath}`);
+        }
+        const dest = `${root}/${sub}`;
+        if (!dest.startsWith(root + "/")) {
+            throw new Error(`Resolved destination escapes the site web root: ${dest}`);
+        }
+        return dest;
+    };
+    server.tool("site_files_upload", "Upload a local file or directory from THIS machine into a site's web root, over SSH (rsync, scp fallback). Resolves the site's index_dir + owner via site_get, transfers with your own ssh key (bytes never pass through the model), then chowns to the site's system user AND normalises perms on the destination subtree to FastPanel's web defaults (dirs 755, files 644) so nginx/PHP-FPM can serve it (local file modes are not relied on). " +
+        "rsync TRAILING-SLASH semantics: local_path 'build/' uploads the CONTENTS of build into the destination; 'build' (no slash) uploads the build dir itself, creating <dest>/build. dest_subpath is relative to the web root (omit to target the root). " +
+        "delete:true mirrors the source (rsync --delete removes remote files absent locally) — needs rsync, gated behind confirm. WRITE — set dry_run:true to preview, confirm:true to execute. Requires SSH configured (FASTPANEL_SSH_HOST).", {
+        site_id: z.number().int().positive().describe("Site id from sites_list"),
+        local_path: z
+            .string()
+            .min(1)
+            .describe("Path on THIS machine to a file or directory. Trailing slash on a dir uploads its contents."),
+        dest_subpath: z
+            .string()
+            .optional()
+            .describe("Destination relative to the site web root (e.g. 'public' or 'wp-content/uploads'). Omit for the web root itself."),
+        delete: z
+            .boolean()
+            .default(false)
+            .describe("rsync --delete: make the remote an exact mirror of local_path, removing remote-only files. Destructive."),
+        confirm: z.boolean().default(false),
+        dry_run: z.boolean().default(false),
+    }, async ({ site_id, local_path, dest_subpath, delete: del, confirm, dry_run }) => {
+        try {
+            const { user, root } = await resolveSiteRoot(site_id);
+            const dest = resolveDest(root, dest_subpath);
+            const g = writeGuard({ confirm, dry_run }, `ssh: rsync ${local_path} → ${dest} (chown ${user}:${user})`, {
+                local_path,
+                dest,
+                owner: user,
+                delete: del,
+                note: "Trailing slash on local_path matters: 'dir/' uploads contents, 'dir' uploads the dir itself.",
+            });
+            if (g.kind === "dry")
+                return g.result;
+            logWrite("ssh rsync upload", { local_path, dest, owner: user, delete: del });
+            // umask 022 so any NEWLY created dir is 755 (traversable by nginx/www-data) — root's
+            // default 077 would make it 700 and unservable. Existing dirs are left untouched.
+            const mk = await ssh.exec(`(umask 022; mkdir -p ${shq(dest)})`);
+            if (mk.code !== 0)
+                throw new Error(`could not create destination ${dest} (exit ${mk.code})`);
+            const res = await ssh.upload(local_path, dest, { delete: del });
+            if (res.code !== 0) {
+                throw new Error(`transfer failed (exit ${res.code})${res.stderr ? ": " + res.stderr.trim() : ""}`);
+            }
+            // Normalise ownership + web perms on the server (not via rsync --chmod: the local
+            // rsync version can't be trusted — old macOS rsync ignores it). dirs→755, files→644
+            // is FastPanel's own default and what nginx/PHP-FPM need to traverse/read. chown
+            // covers the topmost dir we created (so root-owned intermediates don't linger);
+            // perms are normalised only on the uploaded subtree.
+            const sub = (dest_subpath ?? "").replace(/^\/+/, "").replace(/\/+$/, "");
+            const chownTarget = sub ? `${root}/${sub.split("/")[0]}` : dest;
+            const fix = await ssh.exec(`chown -R ${shq(`${user}:${user}`)} ${shq(chownTarget)} && ` +
+                `find ${shq(dest)} -type d -exec chmod 755 {} + && ` +
+                `find ${shq(dest)} -type f -exec chmod 644 {} +`);
+            if (fix.code !== 0) {
+                throw new Error(`transfer ok but chown/chmod failed (exit ${fix.code}) — files may be root-owned or unservable. Fix: chown -R ${user}:${user} ${dest}`);
+            }
+            return asJsonText({
+                dest,
+                owner: user,
+                status: "uploaded",
+                transfer_summary: res.stdout.trim().split("\n").slice(-14).join("\n"),
+            });
+        }
+        catch (err) {
+            return asError(err);
+        }
+    });
+    server.tool("site_files_deploy", "Deploy site files onto the host by fetching them ON the server (no local copy needed) — git clone or a downloaded tarball — into the site's web root, then chowning to the site's system user. Resolves index_dir + owner via site_get. The fetch runs as root on the panel host; only https:// sources are accepted. " +
+        "source_type 'git': shallow-clones source (optionally at `ref`) and copies the tree (excluding .git) into the destination. source_type 'tarball': curls the archive and extracts it; a single wrapping top-level directory (e.g. GitHub's repo-main/) is descended into automatically. Existing files are overwritten; nothing is deleted. dest_subpath is relative to the web root. WRITE — dry_run:true to preview, confirm:true to execute. Requires SSH (FASTPANEL_SSH_HOST).", {
+        site_id: z.number().int().positive().describe("Site id from sites_list"),
+        source: z
+            .string()
+            .min(1)
+            .regex(/^https:\/\//, "source must be an https:// URL")
+            .describe("https:// git repo URL (source_type=git) or https:// .tar.gz archive URL (source_type=tarball)"),
+        source_type: z
+            .enum(["git", "tarball"])
+            .default("git")
+            .describe("git = clone a repo; tarball = download and extract a .tar.gz"),
+        ref: z
+            .string()
+            .regex(/^[A-Za-z0-9._/-]+$/, "ref may only contain letters, digits, '.', '_', '-', '/'")
+            .optional()
+            .describe("git branch/tag to check out (source_type=git only). Omit for the default branch."),
+        dest_subpath: z
+            .string()
+            .optional()
+            .describe("Destination relative to the site web root. Omit for the web root itself."),
+        confirm: z.boolean().default(false),
+        dry_run: z.boolean().default(false),
+    }, async ({ site_id, source, source_type, ref, dest_subpath, confirm, dry_run }) => {
+        try {
+            const { user, root } = await resolveSiteRoot(site_id);
+            const dest = resolveDest(root, dest_subpath);
+            const own = shq(`${user}:${user}`);
+            const remote = source_type === "git"
+                ? [
+                    "set -e",
+                    "umask 022", // new dirs/files become 755/644 so nginx can serve them
+                    'tmp=$(mktemp -d)',
+                    `trap 'rm -rf "$tmp"' EXIT`,
+                    `git clone --depth 1 ${ref ? `--branch ${shq(ref)} ` : ""}${shq(source)} "$tmp/repo"`,
+                    `mkdir -p ${shq(dest)}`,
+                    `( cd "$tmp/repo" && tar -cf - --exclude=.git . ) | ( cd ${shq(dest)} && tar -xf - )`,
+                    `chown -R ${own} ${shq(dest)}`,
+                ].join("\n")
+                : [
+                    "set -e",
+                    "umask 022", // new dirs/files become 755/644 so nginx can serve them
+                    'tmp=$(mktemp -d)',
+                    `trap 'rm -rf "$tmp"' EXIT`,
+                    `curl -fsSL ${shq(source)} -o "$tmp/archive"`,
+                    `mkdir -p "$tmp/x" && tar -xf "$tmp/archive" -C "$tmp/x"`,
+                    // If the archive unpacked to a single top-level dir, deploy its contents.
+                    `inner="$tmp/x"; if [ "$(ls -A "$tmp/x" | wc -l)" = "1" ]; then only="$tmp/x/$(ls -A "$tmp/x")"; [ -d "$only" ] && inner="$only"; fi`,
+                    `mkdir -p ${shq(dest)}`,
+                    `( cd "$inner" && tar -cf - . ) | ( cd ${shq(dest)} && tar -xf - )`,
+                    `chown -R ${own} ${shq(dest)}`,
+                ].join("\n");
+            const g = writeGuard({ confirm, dry_run }, `ssh: deploy ${source_type} ${source} → ${dest} (chown ${user}:${user})`, { source, source_type, ref: ref ?? null, dest, owner: user, remote_script: remote });
+            if (g.kind === "dry")
+                return g.result;
+            logWrite("ssh deploy", { source, source_type, ref: ref ?? null, dest, owner: user });
+            const res = await ssh.exec(remote);
+            if (res.code !== 0) {
+                throw new Error(`deploy failed (exit ${res.code})${res.stderr ? ": " + res.stderr.trim() : ""}`);
+            }
+            return asJsonText({ dest, owner: user, source, source_type, ref: ref ?? null, status: "deployed" });
+        }
+        catch (err) {
+            return asError(err);
+        }
+    });
+    server.tool("site_file_put", "Write a single small file into a site's web root from inline content, over SSH, then chown it to the site's system user. For quick one-off files (index.html placeholder, .htaccess, robots.txt) — the content travels through the model, so keep it small; use site_files_upload/site_files_deploy for real payloads. rel_path is the file path relative to the web root; parent directories are created as needed. WRITE — dry_run:true to preview, confirm:true to execute. Requires SSH (FASTPANEL_SSH_HOST).", {
+        site_id: z.number().int().positive().describe("Site id from sites_list"),
+        rel_path: z
+            .string()
+            .min(1)
+            .regex(/^[A-Za-z0-9._/-]+$/, "rel_path may only contain letters, digits, '.', '_', '-', '/'")
+            .describe("File path relative to the web root, e.g. 'index.html' or 'assets/robots.txt'"),
+        content: z
+            .string()
+            .max(262144)
+            .describe("File contents (max 256KB). Use encoding:'base64' for binary."),
+        encoding: z
+            .enum(["utf8", "base64"])
+            .default("utf8")
+            .describe("How `content` is encoded. base64 for binary files."),
+        confirm: z.boolean().default(false),
+        dry_run: z.boolean().default(false),
+    }, async ({ site_id, rel_path, content, encoding, confirm, dry_run }) => {
+        try {
+            const rel = rel_path.replace(/^\/+/, "");
+            if (rel.endsWith("/") || rel.split("/").some((seg) => seg === ".." || seg === "")) {
+                throw new Error(`rel_path must be a clean file path with no '..' or trailing slash: ${rel_path}`);
+            }
+            const { user, root } = await resolveSiteRoot(site_id);
+            const fullPath = `${root}/${rel}`;
+            if (!fullPath.startsWith(root + "/")) {
+                throw new Error(`Resolved path escapes the site web root: ${fullPath}`);
+            }
+            const parent = fullPath.slice(0, fullPath.lastIndexOf("/"));
+            const slash = rel.indexOf("/");
+            // chown the topmost newly-created dir (or the file itself if it lands at the root).
+            const chownTarget = slash >= 0 ? `${root}/${rel.slice(0, slash)}` : fullPath;
+            const buf = Buffer.from(content, encoding);
+            const g = writeGuard({ confirm, dry_run }, `ssh: write ${buf.length} bytes → ${fullPath} (chown ${user}:${user})`, { path: fullPath, bytes: buf.length, encoding, owner: user });
+            if (g.kind === "dry")
+                return g.result;
+            logWrite("ssh file put", { path: fullPath, bytes: buf.length, owner: user });
+            // umask 022 so newly created parent dirs are 755 (nginx-traversable), not root's 700.
+            const mk = await ssh.exec(`(umask 022; mkdir -p ${shq(parent)})`);
+            if (mk.code !== 0)
+                throw new Error(`could not create parent dir ${parent} (exit ${mk.code})`);
+            const res = await ssh.putContent(buf, fullPath);
+            if (res.code !== 0) {
+                throw new Error(`write failed (exit ${res.code})${res.stderr ? ": " + res.stderr.trim() : ""}`);
+            }
+            // `cat >` created the file under root's umask (→ 600). Force 644 so nginx can read it,
+            // then chown the file (and any dirs we just created) to the site user.
+            const fix = await ssh.exec(`chmod 644 ${shq(fullPath)} && chown -R ${shq(`${user}:${user}`)} ${shq(chownTarget)}`);
+            if (fix.code !== 0) {
+                throw new Error(`write ok but chmod/chown failed (exit ${fix.code}) — file may be root-owned or unreadable. Fix: chmod 644 ${fullPath} && chown ${user}:${user} ${fullPath}`);
+            }
+            return asJsonText({ path: fullPath, bytes: buf.length, owner: user, status: "written" });
+        }
+        catch (err) {
+            return asError(err);
+        }
+    });
     // ──────────────────────────────────────────────────────────────────────────
     // WRITE TOOLS — each requires confirm:true, supports dry_run:true
     // ──────────────────────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ Ask an LLM, get real infra changes on your FastPanel server:
 
 ## Features
 
-- **29 tools** covering sites, databases (incl. SSH dump/import), users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, and raw nginx/apache/php.ini configs.
+- **32 tools** covering sites, databases (incl. SSH dump/import), users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, file upload/deploy into a site's web root, and raw nginx/apache/php.ini configs.
 - **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
 - **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
@@ -57,7 +57,7 @@ These are documented in the tool descriptions so the LLM doesn't have to redisco
 ## Install
 
 ```bash
-git clone https://github.com/<you>/fastpanel-mcp.git
+git clone https://github.com/iMateo/fastpanel-mcp.git
 cd fastpanel-mcp
 pnpm install      # or: npm install
 pnpm build
@@ -181,7 +181,7 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 
 ### SSH-backed (require `FASTPANEL_SSH_HOST`)
 
-These do what the REST API can't — they run on the panel host itself. Opt-in and host-agnostic: set `FASTPANEL_SSH_HOST` (+ optional `FASTPANEL_SSH_USER`/`PORT`/`KEY`) to point at **any** FastPanel server. The server shells out to your own `ssh` client, so the host just needs to be reachable with key-based auth. Both tools below are read-only.
+These do what the REST API can't — they run on the panel host itself. Opt-in and host-agnostic: set `FASTPANEL_SSH_HOST` (+ optional `FASTPANEL_SSH_USER`/`PORT`/`KEY`) to point at **any** FastPanel server. The server shells out to your own `ssh` client, so the host just needs to be reachable with key-based auth. `nginx_validate` and `site_doctor` are read-only; the rest are writes (`confirm: true` + `dry_run` preview).
 
 | Tool | Runs | Purpose |
 |---|---|---|
@@ -189,8 +189,11 @@ These do what the REST API can't — they run on the panel host itself. Opt-in a
 | `site_doctor` | `stat` / `systemctl` / `nginx -t` | Diagnose why a site errors: missing docroot, a parent dir without `o+x` (the 750 → 404 trap), missing FPM socket, dead backend, broken nginx config |
 | `database_dump` | `mysqldump` | Dump a database to a `.sql` file in the staging dir (local MySQL). Writes a root-owned file — needs `confirm: true` |
 | `database_import` | `mysql` | Load a `.sql` file (from the staging dir) into a database. **Destructive** — needs `confirm: true` |
+| `site_files_upload` | `rsync` (scp fallback) | Upload a local file/dir into a site's web root, then chown to the site user. `delete: true` mirrors (removes remote-only files) |
+| `site_files_deploy` | `git clone` / `curl` + `tar` | Fetch files on the host (https git repo or tarball) into a site's web root, then chown to the site user |
+| `site_file_put` | `cat` over ssh | Write one small inline file (placeholder/.htaccess/robots.txt) into a site's web root, then chown to the site user |
 
-Dump/import paths are confined to a staging dir (default `/root/fastpanel-mcp-dumps`, override with `FASTPANEL_DUMP_DIR`); paths outside it or containing `..` are rejected.
+Dump/import paths are confined to a staging dir (default `/root/fastpanel-mcp-dumps`, override with `FASTPANEL_DUMP_DIR`); paths outside it or containing `..` are rejected. The three upload/deploy tools resolve the site's `index_dir` + owner via `site_get`, refuse destination subpaths that escape the web root or contain shell-unsafe characters, and `chown` everything to the site's system user so nginx/PHP-FPM can serve it (root-owned files would 403).
 
 ## Cookbook
 

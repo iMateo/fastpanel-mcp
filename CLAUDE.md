@@ -30,7 +30,7 @@ Four layers, registered in `index.ts:main()`:
 
 - **`config.ts`** — `loadConfig()` reads env (`FASTPANEL_URL`, `FASTPANEL_TOKEN`, optional `FASTPANEL_WRITE_TOKEN`, `FASTPANEL_INSECURE_TLS`, `FASTPANEL_TIMEOUT_MS`, and the optional `FASTPANEL_SSH_*` block) and throws on missing required vars. The dual-token split lives here: `writeToken` is `null` when unset; `ssh` is `null` until `FASTPANEL_SSH_HOST` is set.
 - **`client.ts`** — `FastPanelClient` wraps `undici` with one persistent `Agent`. `get()` uses the read token; `post/patch/put/delete()` set `requiresWrite:true` and use the write token, throwing `FastPanelWriteDisabledError` if it's null. `>=400` responses throw `FastPanelError` carrying status + parsed body.
-- **`ssh.ts`** — `SshClient` shells out to the operator's own `ssh` (via `execFile`, no library dep, no local shell) to run commands on the panel host. Opt-in and host-agnostic — nothing about a specific server is baked in; host/user/port/key all come from `FASTPANEL_SSH_*`. `exec()` resolves with stdout/stderr/exit code (does not throw on non-zero, so callers can read e.g. `nginx -t` failures); throws `SshDisabledError` when SSH is unconfigured. Dynamic values interpolated into remote commands MUST go through `shq()`.
+- **`ssh.ts`** — `SshClient` shells out to the operator's own `ssh` (via `execFile`, no library dep, no local shell) to run commands on the panel host. Opt-in and host-agnostic — nothing about a specific server is baked in; host/user/port/key all come from `FASTPANEL_SSH_*`. `exec()` resolves with stdout/stderr/exit code (does not throw on non-zero, so callers can read e.g. `nginx -t` failures); throws `SshDisabledError` when SSH is unconfigured. `upload()` pushes a local file/dir with `rsync` (scp fallback if local rsync is missing; `--delete` is rsync-only) and `putContent()` streams an inline buffer into a remote file via `cat` over `spawn` — both reuse the same connection options as `exec()` and never route bytes through the model for the rsync path. Dynamic values interpolated into remote commands MUST go through `shq()`.
 - **`tools.ts`** — `registerTools(server, client, ssh)` registers every tool. This is where all FastPanel API knowledge lives.
 
 ### How a tool is built
@@ -62,6 +62,7 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 - **PHP versions are dotless enums:** `"74"`, `"80"`, `"82"`, `"83"`, `"84"`.
 - **Backend updates use the backend id, not the site id:** `PUT /api/sites/backend/{backend_id}` where `backend_id = main_backend.id` from `site_get` — passing a site id 404s. `site_backend_update` takes a site id and resolves the backend id internally.
 - **Document root lives on the site, not the backend:** nginx renders `root` from `site.index_dir`. `site_backend_update` does NOT change it; `site_update` (PUT `/api/sites/{id}`) does. The `index_dir` write path is reverse-engineered and unverified — see the tool's warning.
+- **Uploaded web-root files MUST be owned by the site's system user, not root.** The web root is `site.index_dir`; the owning user is `site.owner.username` (both from `site_get`, unwrap `.data`). The file-upload tools (`site_files_upload`/`site_files_deploy`/`site_file_put`) SSH in as root, so they always `chown -R <owner>:<owner>` after writing — root-owned files under the web root get 403'd by nginx/PHP-FPM. They also reject destination subpaths that escape `index_dir` or contain shell-unsafe characters (the remote path is shell-expanded by rsync/git).
 - **`site_configuration_update` — the API requires all three** of `frontend`/`backend`/`phpini`, but the tool now accepts partial input and back-fills omitted blocks from `site_configuration_get`. The first manual update flips the site to `manual_changes=true` server-side, after which FastPanel stops auto-managing the 443 block, HTTP→HTTPS redirect, and LE renewal locations. Bad syntax can take down the site or the whole nginx/apache service — and the tool does not run `nginx -t`.
 
 ## Adding a tool
@@ -69,7 +70,7 @@ These are load-bearing; they were discovered from the panel's SPA bundle and liv
 1. Add a `server.tool(...)` block in `tools.ts` (read tools near the top, write tools below the divider comment).
 2. Reads call `client.get()`; writes call `client.post/put/patch/delete()`, take `confirm`+`dry_run`, and go through `writeGuard()`.
 3. Encode any non-obvious API behavior in the tool's `description` string — that text is the LLM's only documentation at runtime.
-4. Keep the `README.md` tool tables and the tool count (currently 29) in sync.
+4. Keep the `README.md` tool tables and the tool count (currently 32) in sync.
 5. `pnpm build && pnpm typecheck`, then smoke-test against a panel if it's a read tool.
 
 ## Project conventions
