@@ -5,9 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io/)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](./CHANGELOG.md)
 
 **Keywords:** FastPanel, MCP, Model Context Protocol, Claude Code, Claude Desktop, server management, hosting automation, nginx, Let's Encrypt, DevOps, LLM ops, AI sysadmin.
+
+**Read this in other languages:** [English](./README.md) · [Русский](./README.ru.md) · [Українська](./README.uk.md) · [Español](./README.es.md) · [Deutsch](./README.de.md)
 
 ---
 
@@ -35,7 +37,9 @@ Ask an LLM, get real infra changes on your FastPanel server:
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
 - **Compact response mode** on sites_list to avoid overflowing LLM context on large panels.
 - **stderr audit log** for every executed write, with passwords redacted.
-- **Tested against a live FastPanel 2 panel** with 38 sites in production.
+- **MCP tool annotations** (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`) so clients and policy scanners classify each tool correctly instead of treating read-only diagnostics as destructive.
+- **`nginx -t` auto-validation with rollback** — `site_configuration_update` validates the live config after applying and reverts a broken edit automatically when SSH is configured.
+- **Tested against a live FastPanel 2 panel** with 35+ sites in production.
 
 ## Why this exists
 
@@ -65,18 +69,20 @@ pnpm build
 
 ## Get API tokens
 
-On the FastPanel host, create a read-only token for day-to-day use:
+On the FastPanel host (as root), create a read-only token for day-to-day use:
 
 ```bash
-fastpanel users tokens add -n mcp-read -s read_only -e 2026-12-31
+mogwai users tokens add -n mcp-read -s read_only -e 2030-12-31
 ```
+
+> The CLI binary is `/usr/local/fastpanel2/fastpanel`; recent FastPanel builds expose it on `PATH` as `mogwai` (`/usr/local/bin/mogwai` → the same binary). Older docs call it `fastpanel`, which is **not** on `PATH` — use `mogwai`, or the full path. Root only.
 
 Copy the `msg` field from the returned JSON — that's your token. It bypasses 2FA and survives session TTLs, so treat it as a server credential.
 
-Optional write token, with short expiry and IP lock:
+Optional write token, with an expiry and IP lock:
 
 ```bash
-fastpanel users tokens add -n mcp-write -c <your-ip> -e 2026-05-31
+mogwai users tokens add -n mcp-write -c <your-ip> -e 2030-12-31
 ```
 
 Leave `FASTPANEL_WRITE_TOKEN` unset in configs where you don't need writes.
@@ -176,7 +182,7 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `site_update` | `PUT /api/sites/{id}` | Change document root (`index_dir`) / directory index — e.g. point a Laravel site at `public/` (`framework: "laravel"` preset) |
 | `site_ssl_update` | `PUT /api/sites/{id}` | Attach / replace / detach an SSL certificate, toggle HTTPS / HTTP2 / HTTP3 / HSTS |
 | `site_backend_update` | `PUT /api/sites/backend/{backend_id}` | Change PHP version, handler, port, socket, env vars (pass site id — backend id resolved internally) |
-| `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace raw nginx/apache/php.ini for the site. **Dangerous**: bad syntax can break the site |
+| `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace raw nginx/apache/php.ini for the site. **Dangerous**: bad syntax can break the site — when SSH is configured, runs `nginx -t` after applying and **auto-reverts** on failure (`validate: false` to skip) |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new Let's Encrypt certificate (async — poll `queue_active`) |
 
 ### SSH-backed (require `FASTPANEL_SSH_HOST`)
@@ -234,8 +240,10 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 - **`confirm: true`** is a required argument on every write tool. Tools refuse to execute without it — this is your last line of defence against a confused LLM.
 - **`dry_run: true`** returns the exact JSON body that would be sent, passwords redacted as `***`, and skips the HTTP call entirely.
 - **stderr audit log** records every executed write with redacted payload. In Claude Code this surfaces in MCP logs.
+- **`nginx -t` auto-validation.** With SSH configured, `site_configuration_update` runs `nginx -t` right after applying and **auto-reverts to the previous config** if it fails — a bad edit can't leave nginx unable to reload. Pass `validate: false` to opt out.
+- **Tool annotations.** Every tool ships MCP `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` hints so MCP clients and external policy gateways can apply the right guardrails per tool.
 - **No delete tools** yet. Destructive operations are left to the UI until they're deliberately added.
-- **IP-lock tokens** (`fastpanel users tokens add -c <ip>`) so a leaked token can't be used from elsewhere.
+- **IP-lock tokens** (`mogwai users tokens add -c <ip>`) so a leaked token can't be used from elsewhere.
 
 ## Known gotchas
 

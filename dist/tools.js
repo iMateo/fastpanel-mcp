@@ -50,6 +50,12 @@ function redactPasswords(obj) {
     }
     return out;
 }
+// MCP tool annotations — hints so clients and external scanners classify tools
+// correctly (a read-only diagnostic must not be lumped in with a destructive write).
+// openWorldHint is true for every tool: they all reach a remote FastPanel host or its shell.
+const ANN_READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+const ANN_CREATE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+const ANN_MODIFY = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true };
 export function registerTools(server, client, ssh) {
     // ──────────────────────────────────────────────────────────────────────────
     // READ TOOLS
@@ -60,7 +66,7 @@ export function registerTools(server, client, ssh) {
             .boolean()
             .default(true)
             .describe("If true, return only essential fields (id, domain, aliases, ips, owner, enabled, status, https_redirect, http2, size, databases_size, created_at). If false, returns all 40 fields per site."),
-    }, async ({ limit, compact }) => {
+    }, ANN_READ, async ({ limit, compact }) => {
         try {
             const data = await client.get("/api/sites/list", { "filter[limit]": limit, "filter[type]": "all" });
             if (!compact)
@@ -93,7 +99,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("site_get", "Get full details for a single site by id. Returns all 40 fields including SSL certificate, backend config, permissions, backup plan, stats.", { site_id: z.number().int().positive().describe("Site id from sites_list") }, async ({ site_id }) => {
+    server.tool("site_get", "Get full details for a single site by id. Returns all 40 fields including SSL certificate, backend config, permissions, backup plan, stats.", { site_id: z.number().int().positive().describe("Site id from sites_list") }, ANN_READ, async ({ site_id }) => {
         try {
             const data = await client.get(`/api/sites/${site_id}`);
             return asJsonText(data);
@@ -102,7 +108,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("databases_list", "List all MySQL and PostgreSQL databases. Returns id, name, charset, size, owner, linked site, server, last dump timestamp.", {}, async () => {
+    server.tool("databases_list", "List all MySQL and PostgreSQL databases. Returns id, name, charset, size, owner, linked site, server, last dump timestamp.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/databases");
             return asJsonText(data);
@@ -111,7 +117,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("database_servers_list", "List available database servers (MySQL, PostgreSQL). Use the returned ids as server_id in database_create and site_create.", {}, async () => {
+    server.tool("database_servers_list", "List available database servers (MySQL, PostgreSQL). Use the returned ids as server_id in database_create and site_create.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/databases/servers");
             return asJsonText(data);
@@ -120,7 +126,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("users_list", "List all FastPanel system users (site owners). Returns id, username, home_dir, roles, PHP version, quota, ssh_access, enabled flag.", {}, async () => {
+    server.tool("users_list", "List all FastPanel system users (site owners). Returns id, username, home_dir, roles, PHP version, quota, ssh_access, enabled flag.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/users");
             return asJsonText(data);
@@ -129,7 +135,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("dns_domains_list", "List all DNS zones managed by FastPanel's DNS service. Empty if DNS is not configured.", {}, async () => {
+    server.tool("dns_domains_list", "List all DNS zones managed by FastPanel's DNS service. Empty if DNS is not configured.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/dns/domains");
             return asJsonText(data);
@@ -138,7 +144,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("dns_records_list", "List all DNS records for a specific domain (zone) by its id. Use dns_domains_list first to get ids.", { domain_id: z.number().int().positive().describe("DNS zone id from dns_domains_list") }, async ({ domain_id }) => {
+    server.tool("dns_records_list", "List all DNS records for a specific domain (zone) by its id. Use dns_domains_list first to get ids.", { domain_id: z.number().int().positive().describe("DNS zone id from dns_domains_list") }, ANN_READ, async ({ domain_id }) => {
         try {
             const data = await client.get(`/api/dns/domain/${domain_id}/records`);
             return asJsonText(data);
@@ -147,7 +153,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("certificates_list", "List all SSL certificates stored in FastPanel (Let's Encrypt and custom). Returns id, name, type, common_name, alternative_name, expiration, linked site. Also injects computed crt_path/key_path — the on-disk paths FastPanel writes certs to (/var/www/httpd-cert/<name>.crt|.key). These are needed when hand-writing a 443 server block after a site is in manual_changes mode. NOTE: the paths are derived from FastPanel's naming convention, not returned by the API — verify on disk (ls /var/www/httpd-cert/) if a cert was imported rather than issued by the panel.", {}, async () => {
+    server.tool("certificates_list", "List all SSL certificates stored in FastPanel (Let's Encrypt and custom). Returns id, name, type, common_name, alternative_name, expiration, linked site. Also injects computed crt_path/key_path — the on-disk paths FastPanel writes certs to (/var/www/httpd-cert/<name>.crt|.key). These are needed when hand-writing a 443 server block after a site is in manual_changes mode. NOTE: the paths are derived from FastPanel's naming convention, not returned by the API — verify on disk (ls /var/www/httpd-cert/) if a cert was imported rather than issued by the panel.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/certificates");
             const enriched = (data.data ?? []).map((c) => ({
@@ -161,7 +167,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("system_load", "Get current server load metrics — CPU, memory, disk, uptime. Source: FastPanel's internal /api/loads/full endpoint.", {}, async () => {
+    server.tool("system_load", "Get current server load metrics — CPU, memory, disk, uptime. Source: FastPanel's internal /api/loads/full endpoint.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/loads/full");
             return asJsonText(data);
@@ -170,7 +176,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("queue_list", "List active and recent FastPanel background tasks (backups, migrations, SSL issuance, screenshots, etc) including completed ones.", { limit: z.number().int().positive().max(1000).default(100).describe("Max rows to return") }, async ({ limit }) => {
+    server.tool("queue_list", "List active and recent FastPanel background tasks (backups, migrations, SSL issuance, screenshots, etc) including completed ones.", { limit: z.number().int().positive().max(1000).default(100).describe("Max rows to return") }, ANN_READ, async ({ limit }) => {
         try {
             const data = await client.get("/api/queue/list", { "filter[limit]": limit });
             return asJsonText(data);
@@ -184,7 +190,7 @@ export function registerTools(server, client, ssh) {
             .boolean()
             .default(false)
             .describe("If true, return finished tasks too (with their SUCCESS/FAILED status) instead of only in-flight ones."),
-    }, async ({ include_finished }) => {
+    }, ANN_READ, async ({ include_finished }) => {
         try {
             const data = await client.get("/api/queue");
             const tasks = data.data ?? [];
@@ -214,7 +220,7 @@ export function registerTools(server, client, ssh) {
             .default("frontend_error")
             .describe("frontend_* = nginx, backend_* = PHP-FPM/Apache; *_error for diagnostics, *_access for traffic"),
         lines: z.number().int().positive().max(5000).default(100).describe("Number of trailing lines to return"),
-    }, async ({ site_id, type, lines }) => {
+    }, ANN_READ, async ({ site_id, type, lines }) => {
         const path = `/api/sites/${site_id}/log/${lines}/${type}`;
         const normalise = (body) => {
             const text = body && typeof body === "object" && "errors" in body
@@ -233,7 +239,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("site_resources", "List the resources attached to a site — linked databases, sub-domains, DNS zones and email domains. Maps to GET /api/sites/{site_id}/resources. Handy before deleting or migrating a site, or to find which database(s) belong to it.", { site_id: z.number().int().positive().describe("Site id from sites_list") }, async ({ site_id }) => {
+    server.tool("site_resources", "List the resources attached to a site — linked databases, sub-domains, DNS zones and email domains. Maps to GET /api/sites/{site_id}/resources. Handy before deleting or migrating a site, or to find which database(s) belong to it.", { site_id: z.number().int().positive().describe("Site id from sites_list") }, ANN_READ, async ({ site_id }) => {
         try {
             const data = await client.get(`/api/sites/${site_id}/resources`);
             return asJsonText(data);
@@ -242,7 +248,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("backup_plans_list", "List configured backup plans (FastPanel v2 backup system). Maps to GET /api/v2/backup/plans. Empty data array means no backup plans are configured.", {}, async () => {
+    server.tool("backup_plans_list", "List configured backup plans (FastPanel v2 backup system). Maps to GET /api/v2/backup/plans. Empty data array means no backup plans are configured.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/v2/backup/plans");
             return asJsonText(data);
@@ -251,7 +257,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("me", "Identify the FastPanel account behind the current READ token — username, roles, home dir, ssh access. Maps to GET /api/me. Use to confirm which user/token the server is authenticated as. NOTE: this always reflects the read token; it does not tell you whether a write token is configured.", {}, async () => {
+    server.tool("me", "Identify the FastPanel account behind the current READ token — username, roles, home dir, ssh access. Maps to GET /api/me. Use to confirm which user/token the server is authenticated as. NOTE: this always reflects the read token; it does not tell you whether a write token is configured.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/me");
             return asJsonText(data);
@@ -260,7 +266,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("settings_get", "Read panel-wide settings — OS release, license type, upload limit, email notification config, statistics toggles, etc. Maps to GET /api/settings.", {}, async () => {
+    server.tool("settings_get", "Read panel-wide settings — OS release, license type, upload limit, email notification config, statistics toggles, etc. Maps to GET /api/settings.", {}, ANN_READ, async () => {
         try {
             const data = await client.get("/api/settings");
             return asJsonText(data);
@@ -272,7 +278,7 @@ export function registerTools(server, client, ssh) {
     // ──────────────────────────────────────────────────────────────────────────
     // SSH-BACKED TOOLS — require FASTPANEL_SSH_HOST; run on the panel host itself
     // ──────────────────────────────────────────────────────────────────────────
-    server.tool("nginx_validate", "Run `nginx -t` on the FastPanel host (over SSH) to validate the live nginx config — use it before and after site_configuration_update to catch syntax errors that would otherwise take nginx (and every site on it) down. Read-only: does NOT reload or modify anything. Requires SSH configured (FASTPANEL_SSH_HOST); uses your own ssh client.", {}, async () => {
+    server.tool("nginx_validate", "Run `nginx -t` on the FastPanel host (over SSH) to validate the live nginx config — use it before and after site_configuration_update to catch syntax errors that would otherwise take nginx (and every site on it) down. Read-only: does NOT reload or modify anything. Requires SSH configured (FASTPANEL_SSH_HOST); uses your own ssh client.", {}, ANN_READ, async () => {
         try {
             const res = await ssh.exec("nginx -t 2>&1");
             const ok = /test is successful/i.test(res.stdout);
@@ -282,7 +288,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("site_doctor", "Diagnose the common reasons a FastPanel site serves errors — runs host-level checks over SSH and returns a structured report. Catches the classic traps: docroot missing, a parent directory without o+x so nginx (www-data) can't traverse to the docroot (the 750 → '404 File not found' / 'permission denied' problem), missing PHP-FPM socket, dead backend service, and broken nginx config. Read-only. Requires SSH configured (FASTPANEL_SSH_HOST).", { site_id: z.number().int().positive().describe("Site id from sites_list") }, async ({ site_id }) => {
+    server.tool("site_doctor", "Diagnose the common reasons a FastPanel site serves errors — runs host-level checks over SSH and returns a structured report. Catches the classic traps: docroot missing, a parent directory without o+x so nginx (www-data) can't traverse to the docroot (the 750 → '404 File not found' / 'permission denied' problem), missing PHP-FPM socket, dead backend service, and broken nginx config. Read-only. Requires SSH configured (FASTPANEL_SSH_HOST).", { site_id: z.number().int().positive().describe("Site id from sites_list") }, ANN_READ, async ({ site_id }) => {
         try {
             const resp = await client.get(`/api/sites/${site_id}`);
             const site = resp.data ?? {};
@@ -371,7 +377,7 @@ export function registerTools(server, client, ssh) {
             .describe("Absolute .sql path INSIDE the staging dir. Default: <staging>/<name>-<timestamp>.sql"),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ database_id, output_path, confirm, dry_run }) => {
+    }, ANN_CREATE, async ({ database_id, output_path, confirm, dry_run }) => {
         try {
             const name = await resolveLocalMysqlDb(database_id);
             const ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
@@ -409,7 +415,7 @@ export function registerTools(server, client, ssh) {
         source_path: z.string().min(1).describe("Absolute path to the .sql file, inside the staging dir"),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ database_id, source_path, confirm, dry_run }) => {
+    }, ANN_MODIFY, async ({ database_id, source_path, confirm, dry_run }) => {
         try {
             const name = await resolveLocalMysqlDb(database_id);
             const src = assertInStaging(source_path);
@@ -481,7 +487,7 @@ export function registerTools(server, client, ssh) {
             .describe("rsync --delete: make the remote an exact mirror of local_path, removing remote-only files. Destructive."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, local_path, dest_subpath, delete: del, confirm, dry_run }) => {
+    }, ANN_MODIFY, async ({ site_id, local_path, dest_subpath, delete: del, confirm, dry_run }) => {
         try {
             const { user, root } = await resolveSiteRoot(site_id);
             const dest = resolveDest(root, dest_subpath);
@@ -551,7 +557,7 @@ export function registerTools(server, client, ssh) {
             .describe("Destination relative to the site web root. Omit for the web root itself."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, source, source_type, ref, dest_subpath, confirm, dry_run }) => {
+    }, ANN_MODIFY, async ({ site_id, source, source_type, ref, dest_subpath, confirm, dry_run }) => {
         try {
             const { user, root } = await resolveSiteRoot(site_id);
             const dest = resolveDest(root, dest_subpath);
@@ -611,7 +617,7 @@ export function registerTools(server, client, ssh) {
             .describe("How `content` is encoded. base64 for binary files."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, rel_path, content, encoding, confirm, dry_run }) => {
+    }, ANN_MODIFY, async ({ site_id, rel_path, content, encoding, confirm, dry_run }) => {
         try {
             const rel = rel_path.replace(/^\/+/, "");
             if (rel.endsWith("/") || rel.split("/").some((seg) => seg === ".." || seg === "")) {
@@ -672,7 +678,7 @@ export function registerTools(server, client, ssh) {
             .boolean()
             .default(false)
             .describe("If true, show the payload that would be sent without executing."),
-    }, async ({ username, password, roles, quota, confirm, dry_run }) => {
+    }, ANN_CREATE, async ({ username, password, roles, quota, confirm, dry_run }) => {
         try {
             const payload = { username, password, roles, quota };
             const g = writeGuard({ confirm, dry_run }, "POST /api/users", redactPasswords(payload));
@@ -713,7 +719,7 @@ export function registerTools(server, client, ssh) {
         db_user_password: z.string().min(8).describe("DB user password (min 8 chars)"),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ name, charset, server_id, owner_id, site_id, db_user_login, db_user_password, confirm, dry_run, }) => {
+    }, ANN_CREATE, async ({ name, charset, server_id, owner_id, site_id, db_user_login, db_user_password, confirm, dry_run, }) => {
         try {
             const payload = {
                 charset,
@@ -752,7 +758,7 @@ export function registerTools(server, client, ssh) {
             .describe("Preserve manual nginx edits. Usually false when panel manages config."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, confirm, dry_run, ...fields }) => {
+    }, ANN_MODIFY, async ({ site_id, confirm, dry_run, ...fields }) => {
         try {
             // Only include fields that were actually passed (support partial update).
             const payload = { manual_changes: fields.manual_changes };
@@ -794,7 +800,7 @@ export function registerTools(server, client, ssh) {
             .describe("Directory index, e.g. 'index.php index.html'. Omit to keep current."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, index_dir, framework, index_page, confirm, dry_run }) => {
+    }, ANN_MODIFY, async ({ site_id, index_dir, framework, index_page, confirm, dry_run }) => {
         try {
             const resp = await client.get(`/api/sites/${site_id}`);
             const site = resp.data ?? {};
@@ -848,7 +854,7 @@ export function registerTools(server, client, ssh) {
             .describe("RSA key length"),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, email, common_name, alternative_names, force_dns_validation, key_length, confirm, dry_run, }) => {
+    }, ANN_CREATE, async ({ site_id, email, common_name, alternative_names, force_dns_validation, key_length, confirm, dry_run, }) => {
         try {
             const sans = alternative_names.length > 0 ? alternative_names : [common_name];
             const payload = {
@@ -871,7 +877,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("site_configuration_get", "Read the raw nginx (frontend), apache (backend) and php.ini configs for a site. Returns the literal config text as stored by FastPanel. Use before site_configuration_update to see current state — FastPanel's default configs often miss hardening (no .git/.env blocking, etc). Endpoint: GET /api/sites/{site_id}/configuration.", { site_id: z.number().int().positive().describe("Site id from sites_list") }, async ({ site_id }) => {
+    server.tool("site_configuration_get", "Read the raw nginx (frontend), apache (backend) and php.ini configs for a site. Returns the literal config text as stored by FastPanel. Use before site_configuration_update to see current state — FastPanel's default configs often miss hardening (no .git/.env blocking, etc). Endpoint: GET /api/sites/{site_id}/configuration.", { site_id: z.number().int().positive().describe("Site id from sites_list") }, ANN_READ, async ({ site_id }) => {
         try {
             const data = await client.get(`/api/sites/${site_id}/configuration`);
             return asJsonText(data);
@@ -880,7 +886,7 @@ export function registerTools(server, client, ssh) {
             return asError(err);
         }
     });
-    server.tool("site_configuration_update", "Replace the nginx (frontend), apache (backend) and php.ini config for a site. DANGEROUS: invalid syntax can take down the site or the whole nginx/apache service — this tool does NOT validate nginx syntax before applying (no `nginx -t`), so preview with dry_run and double-check by hand. " +
+    server.tool("site_configuration_update", "Replace the nginx (frontend), apache (backend) and php.ini config for a site. DANGEROUS: invalid syntax can take down the site or the whole nginx/apache service. SAFETY NET: when SSH is configured (FASTPANEL_SSH_HOST) and validate:true (the default), the tool runs `nginx -t` right after applying and AUTO-REVERTS to the previous config if it fails, so a bad edit can't leave nginx unable to reload. Without SSH there is NO validation — preview with dry_run and double-check by hand. " +
         "⚠️ SIDE EFFECT — manual mode: the first config update flips the site to manual_changes=true on the panel side. After that, FastPanel STOPS managing this site's config: it will no longer auto-insert the 443 server block, the HTTP→HTTPS redirect, or Let's Encrypt renewal/acme-challenge locations when you issue or renew SSL. You become responsible for the full HTTPS block (including ssl_certificate paths — get them from certificates_list crt_path/key_path). " +
         "Partial update IS supported here (unlike the raw API): omit any of frontend/backend/phpini and the tool fetches the current value via site_configuration_get and sends it back unchanged, so you can safely change just one block. Endpoint: PUT /api/sites/{site_id}/configuration. WRITE — confirm:true required.", {
         site_id: z.number().int().positive().describe("Site id from sites_list"),
@@ -893,38 +899,74 @@ export function registerTools(server, client, ssh) {
             .optional()
             .describe("Full apache/httpd config for this site (VirtualHost block). Omit to keep current."),
         phpini: z.string().optional().describe("Full php.ini overrides for this site. Omit to keep current."),
+        validate: z
+            .boolean()
+            .default(true)
+            .describe("When SSH is configured (FASTPANEL_SSH_HOST), run `nginx -t` right after applying and AUTO-REVERT to the previous config if it fails. Set false to skip the check (no effect if SSH is unconfigured — there is no validation either way then)."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, frontend, backend, phpini, confirm, dry_run }) => {
+    }, ANN_MODIFY, async ({ site_id, frontend, backend, phpini, validate, confirm, dry_run }) => {
         try {
-            // Partial update: fetch current config for any omitted block so we never blank one out.
-            let current;
-            if (frontend === undefined || backend === undefined || phpini === undefined) {
-                const cfg = await client.get(`/api/sites/${site_id}/configuration`);
-                current = cfg.data ?? {};
-            }
-            frontend = frontend ?? current?.frontend ?? "";
-            backend = backend ?? current?.backend ?? "";
-            phpini = phpini ?? current?.phpini ?? "";
-            const payload = { frontend, backend, phpini };
+            // Always snapshot the current config: it back-fills omitted blocks (partial update)
+            // AND is the revert target if `nginx -t` rejects the new config.
+            const cfg = await client.get(`/api/sites/${site_id}/configuration`);
+            const snapshot = {
+                frontend: cfg.data?.frontend ?? "",
+                backend: cfg.data?.backend ?? "",
+                phpini: cfg.data?.phpini ?? "",
+            };
+            const payload = {
+                frontend: frontend ?? snapshot.frontend,
+                backend: backend ?? snapshot.backend,
+                phpini: phpini ?? snapshot.phpini,
+            };
+            const willValidate = validate && ssh.enabled;
             const summary = {
-                frontend_bytes: frontend.length,
-                backend_bytes: backend.length,
-                phpini_bytes: phpini.length,
-                frontend_preview: frontend.slice(0, 200),
-                backend_preview: backend.slice(0, 200),
-                phpini_preview: phpini.slice(0, 200),
+                frontend_bytes: payload.frontend.length,
+                backend_bytes: payload.backend.length,
+                phpini_bytes: payload.phpini.length,
+                frontend_preview: payload.frontend.slice(0, 200),
+                backend_preview: payload.backend.slice(0, 200),
+                phpini_preview: payload.phpini.slice(0, 200),
+                will_validate: willValidate,
             };
             const g = writeGuard({ confirm, dry_run }, `PUT /api/sites/${site_id}/configuration`, summary);
             if (g.kind === "dry")
                 return g.result;
             logWrite(`PUT /api/sites/${site_id}/configuration`, {
-                frontend_bytes: frontend.length,
-                backend_bytes: backend.length,
-                phpini_bytes: phpini.length,
+                frontend_bytes: payload.frontend.length,
+                backend_bytes: payload.backend.length,
+                phpini_bytes: payload.phpini.length,
             });
             const data = await client.put(`/api/sites/${site_id}/configuration`, payload);
-            return asJsonText(data);
+            // Post-flight validation. The API has already written the vhost file, so `nginx -t`
+            // now reflects the NEW config. If it fails we revert to the snapshot — otherwise nginx
+            // would be unable to reload, taking down every site on the host.
+            if (!willValidate) {
+                return asJsonText({
+                    result: data,
+                    nginx_validation: validate
+                        ? "skipped — SSH not configured (set FASTPANEL_SSH_HOST to enable auto-validation + revert)"
+                        : "skipped — validate:false",
+                });
+            }
+            const check = await ssh.exec("nginx -t 2>&1");
+            if (check.code === 0 && /test is successful/i.test(check.stdout)) {
+                return asJsonText({
+                    result: data,
+                    nginx_validation: { ok: true, output: check.stdout.trim() },
+                });
+            }
+            // Bad config — revert to the pre-change snapshot and confirm recovery.
+            logWrite(`REVERT PUT /api/sites/${site_id}/configuration`, { reason: "nginx -t failed" });
+            await client.put(`/api/sites/${site_id}/configuration`, snapshot);
+            const recheck = await ssh.exec("nginx -t 2>&1");
+            const recovered = recheck.code === 0 && /test is successful/i.test(recheck.stdout);
+            return asError(`New config FAILED nginx -t and was auto-reverted to the previous config.\n\n` +
+                `nginx -t reported:\n${check.stdout.trim()}\n\n` +
+                `After revert: ${recovered
+                    ? "nginx -t OK — site restored to its previous config."
+                    : "STILL FAILING — manual intervention needed:\n" + recheck.stdout.trim()}`);
         }
         catch (err) {
             return asError(err);
@@ -949,7 +991,7 @@ export function registerTools(server, client, ssh) {
         work_dir: z.string().optional().describe("Working directory (default: keep current)"),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async ({ site_id, confirm, dry_run, ...rest }) => {
+    }, ANN_MODIFY, async ({ site_id, confirm, dry_run, ...rest }) => {
         try {
             const resp = await client.get(`/api/sites/${site_id}`);
             const site = resp.data ?? {};
@@ -1032,7 +1074,7 @@ export function registerTools(server, client, ssh) {
             .describe("Optionally create an FTP account. Omit to skip."),
         confirm: z.boolean().default(false),
         dry_run: z.boolean().default(false),
-    }, async (args) => {
+    }, ANN_CREATE, async (args) => {
         try {
             if (!args.owner_id && !args.new_owner) {
                 throw new Error("Either owner_id (existing user) or new_owner (create new) is required.");

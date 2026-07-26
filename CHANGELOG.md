@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-07-26
+
+Security-review hardening and file-deployment tooling. **32 tools** total.
+
+### Added
+
+- **MCP tool annotations** on every tool (`readOnlyHint` / `destructiveHint` /
+  `idempotentHint` / `openWorldHint`). Read-only diagnostics like `nginx_validate` and
+  `site_doctor` are now correctly advertised as non-destructive, so MCP clients and external
+  policy scanners stop lumping them in with mutating tools.
+- **`site_configuration_update` auto-validation** — when SSH is configured, the tool runs
+  `nginx -t` immediately after applying and **auto-reverts to the previous config** if the
+  new one fails, so a bad edit can no longer leave nginx unable to reload. Opt out with
+  `validate: false`. Without SSH the behaviour is unchanged (no validation).
+- **`site_files_upload`** / **`site_files_deploy`** / **`site_file_put`** (SSH) — push files
+  into a site's web root (rsync / git-or-tarball / inline), then `chown` to the site's owner
+  so nginx/PHP-FPM can serve them. Reject destination paths that escape `index_dir` or contain
+  shell-unsafe characters.
+
+### Changed
+
+- `site_configuration_update` now always snapshots the current config before writing (used both
+  to back-fill omitted blocks and as the auto-revert target).
+
 ## [1.1.0] - 2026-06-06
 
 Reliability, docroot/config tooling, host-level diagnostics, and an optional SSH layer.
@@ -49,5 +73,6 @@ Reliability, docroot/config tooling, host-level diagnostics, and an optional SSH
 Initial alpha: 12 tools over the FastPanel 2 REST API (sites, databases, users, DNS,
 certificates, system load, queue) with the dual-token + `dry_run`/`confirm` write-safety model.
 
+[1.2.0]: https://github.com/iMateo/fastpanel-mcp/releases/tag/v1.2.0
 [1.1.0]: https://github.com/iMateo/fastpanel-mcp/releases/tag/v1.1.0
 [0.1.0]: https://github.com/iMateo/fastpanel-mcp/releases/tag/v0.1.0
