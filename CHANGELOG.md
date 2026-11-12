@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-11-12
+
+Mailbox management with an optional local password store. **39 tools** total.
+
+### Added
+
+- **`email_domains_list`** / **`email_domain_dkim_get`** / **`mailboxes_list`** / **`mailbox_get`** —
+  read email domains, their DKIM record and mailboxes (size, quota, redirects, aliases, flags).
+- **`mailbox_create`** / **`mailbox_update`** — create mailboxes and change password, quota,
+  redirects, aliases, enabled state. `mailbox_update` is partial: it reads the box and re-sends
+  untouched fields.
+- **`generate_password: true`** on both write tools — FastPanel exposes mailbox passwords through
+  no supported API/CLI path, so the tool mints a strong password and returns it exactly once in
+  the result (never in logs or dry-run previews).
+- **Mailbox password store** (opt-in, `FASTPANEL_PASSWORD_STORE=keychain`, macOS) — every
+  password set through `mailbox_create` / `mailbox_update` is also saved to the login Keychain;
+  **`mailbox_password_get`** reads it back and `mailboxes_list` flags `password_stored` per box.
+  The secret reaches `security` over stdin, never argv.
+
 ## [1.2.0] - 2026-07-26
 
 Security-review hardening and file-deployment tooling. **32 tools** total.

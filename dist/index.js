@@ -4,16 +4,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "./config.js";
 import { FastPanelClient } from "./client.js";
 import { SshClient } from "./ssh.js";
+import { PasswordStore } from "./vault.js";
 import { registerTools } from "./tools.js";
 async function main() {
     const config = loadConfig();
     const client = new FastPanelClient(config);
     const ssh = new SshClient(config);
+    const vault = new PasswordStore(config);
     const server = new McpServer({
         name: "fastpanel-mcp",
-        version: "1.1.0",
+        version: "1.3.0",
     });
-    registerTools(server, client, ssh);
+    registerTools(server, client, ssh, vault);
     const transport = new StdioServerTransport();
     await server.connect(transport);
     const shutdown = async () => {

@@ -14,6 +14,8 @@ export interface Config {
   insecureTls: boolean;
   timeoutMs: number;
   ssh: SshConfig | null;
+  /** Opt-in local vault for mailbox passwords; null = passwords are never persisted. */
+  passwordStore: "keychain" | null;
 }
 
 export function loadConfig(): Config {
@@ -46,6 +48,11 @@ export function loadConfig(): Config {
       }
     : null;
 
+  const store = process.env.FASTPANEL_PASSWORD_STORE?.trim().toLowerCase();
+  if (store && store !== "keychain") {
+    throw new Error(`FASTPANEL_PASSWORD_STORE: unsupported value "${store}" (supported: "keychain", macOS only)`);
+  }
+
   return {
     baseUrl,
     readToken,
@@ -53,5 +60,6 @@ export function loadConfig(): Config {
     insecureTls: process.env.FASTPANEL_INSECURE_TLS === "1",
     timeoutMs: Number(process.env.FASTPANEL_TIMEOUT_MS ?? 30_000),
     ssh,
+    passwordStore: store ? "keychain" : null,
   };
 }

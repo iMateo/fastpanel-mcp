@@ -33,7 +33,7 @@ Pídele a un LLM y obtén cambios reales en la infraestructura de tu servidor Fa
 
 ## Características
 
-- **32 herramientas** que cubren sitios, bases de datos (incluido volcado/importación por SSH), usuarios, zonas DNS, certificados SSL, carga del sistema, cola, registros de sitios, planes de copia de seguridad, diagnósticos a nivel de host, subida/despliegue de archivos en la raíz web de un sitio, y configuraciones raw de nginx/apache/php.ini.
+- **39 herramientas** que cubren sitios, dominios de correo y buzones, bases de datos (incluido volcado/importación por SSH), usuarios, zonas DNS, certificados SSL, carga del sistema, cola, registros de sitios, planes de copia de seguridad, diagnósticos a nivel de host, subida/despliegue de archivos en la raíz web de un sitio, y configuraciones raw de nginx/apache/php.ini.
 - **Modelo de seguridad de doble token.** Las operaciones de lectura usan un token de solo lectura; las operaciones de escritura requieren un token de escritura separado (`FASTPANEL_WRITE_TOKEN`). Si no defines el token de escritura, cada herramienta de escritura falla de forma cerrada.
 - **`confirm: true` requerido** en cada escritura. Las salidas accidentales del LLM no pueden mutar el estado.
 - **`dry_run: true` previsualiza** el cuerpo HTTP exacto que recibiría el servidor — contraseñas redactadas como `***`, sin llamada de red.
@@ -173,6 +173,11 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `backup_plans_list` | `GET /api/v2/backup/plans` | Planes de copia de seguridad configurados |
 | `me` | `GET /api/me` | Cuenta asociada al token de lectura actual (usuario, roles, ssh) |
 | `settings_get` | `GET /api/settings` | Configuración global del panel (SO, licencia, límites, notificaciones) |
+| `email_domains_list` | `GET /api/email/domains` | Listar dominios de correo (opcionalmente de un sitio); los ids se usan en las herramientas de buzones |
+| `email_domain_dkim_get` | `GET /api/email/domains/{id}/dkim` | Registro DNS DKIM (TXT con la clave pública) de un dominio de correo |
+| `mailboxes_list` | `GET /api/email/domains/{id}/boxs` | Buzones de un dominio: tamaño, cuota, redirecciones, alias, opciones (compacto por defecto) |
+| `mailbox_get` | `GET /api/mail/box/{id}` | Un buzón, objeto completo. Las contraseñas nunca se devuelven — FastPanel no permite leerlas |
+| `mailbox_password_get` | macOS Keychain | Contraseña de un buzón desde el almacén de contraseñas **local** (Llavero de macOS). Opcional mediante `FASTPANEL_PASSWORD_STORE=keychain`; solo conoce las contraseñas establecidas a través de este MCP |
 
 ### Escritura (requieren `FASTPANEL_WRITE_TOKEN` + `confirm: true` explícito)
 
@@ -186,6 +191,15 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `site_backend_update` | `PUT /api/sites/backend/{backend_id}` | Cambiar versión de PHP, handler, puerto, socket, variables de entorno (pasa el id del sitio — el id del backend se resuelve internamente) |
 | `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Reemplazar nginx/apache/php.ini raw del sitio. **Peligroso**: una sintaxis incorrecta puede romper el sitio — cuando SSH está configurado, ejecuta `nginx -t` tras aplicar y **revierte automáticamente** en caso de fallo (`validate: false` para omitir) |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Emitir un nuevo certificado Let's Encrypt (asíncrono — sondea `queue_active`) |
+| `mailbox_create` | `POST /api/email/domains/{id}/boxs` | Crear un buzón con redirecciones / alias / cuota. `generate_password: true` genera una contraseña fuerte y la devuelve **una sola vez** |
+| `mailbox_update` | `PUT /api/mail/box/{id}` | Restablecer la contraseña (opcionalmente generada, mostrada una vez), activar/desactivar, cambiar cuota / redirecciones / alias — solo cambian los campos indicados |
+
+### Almacén de contraseñas de buzones (opcional)
+
+FastPanel no permite volver a leer la contraseña de un buzón: ni la API ni la CLI la devuelven (internamente guarda un hash unidireccional para IMAP más una copia reversible que solo el propio proceso del panel puede descifrar, para su propio autologin de Roundcube). Así que conectar un nuevo cliente a un buzón técnico existente normalmente implica restablecer la contraseña y romper todo lo demás que la usa. Define `FASTPANEL_PASSWORD_STORE=keychain` (solo macOS) y cada contraseña establecida mediante `mailbox_create` / `mailbox_update` — generada o explícita — se guardará también en tu llavero de inicio de sesión (servicio `fastpanel-mcp:<host del panel>`, cuenta = dirección del buzón; visible en Acceso a Llaveros). `mailbox_password_get` la recupera y `mailboxes_list` marca cada buzón con `password_stored`.
+
+Las contraseñas establecidas antes de activar el almacén, o cambiadas después en la interfaz del panel, le son desconocidas. El secreto se pasa a `security` por stdin, nunca en argv, y nunca se registra. Contrapartida: cualquier proceso que se ejecute con tu usuario de macOS puede leer estas entradas, y `mailbox_password_get` coloca una credencial en texto plano en el contexto del modelo — deja el almacén desactivado si eso no es aceptable.
+
 
 ### Respaldadas por SSH (requieren `FASTPANEL_SSH_HOST`)
 
@@ -244,7 +258,7 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 - **El registro de auditoría en stderr** registra cada escritura ejecutada con la carga útil redactada. En Claude Code esto aparece en los registros de MCP.
 - **Autovalidación con `nginx -t`.** Con SSH configurado, `site_configuration_update` ejecuta `nginx -t` justo después de aplicar y **revierte automáticamente a la configuración anterior** si falla — una edición incorrecta no puede dejar nginx sin poder recargar. Pasa `validate: false` para omitirlo.
 - **Anotaciones de herramientas.** Cada herramienta incluye las sugerencias MCP `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` para que los clientes MCP y las pasarelas de política externa puedan aplicar las salvaguardas correctas por herramienta.
-- **Sin herramientas de eliminación** por ahora. Las operaciones destructivas se dejan en la interfaz de usuario hasta que se añadan deliberadamente.
+- **Sin herramientas de eliminación** por ahora — tampoco para eliminar o vaciar buzones. Las operaciones destructivas se quedan de momento en la interfaz de usuario; están previstas para más adelante, cuando el propio protocolo MCP ofrezca mayores garantías de seguridad para acciones irreversibles.
 - **Tokens bloqueados por IP** (`mogwai users tokens add -c <ip>`) para que un token filtrado no pueda usarse desde otro lugar.
 
 ## Problemas conocidos
@@ -258,10 +272,10 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 
 ## Hoja de ruta
 
-- Herramientas de eliminación (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`)
+- Herramientas de eliminación (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`, eliminar/vaciar buzones) — más adelante, cuando MCP sea más seguro para operaciones irreversibles
 - CRUD de registros DNS
 - Gestión de planes de copia de seguridad (listar / ejecutar / restaurar)
-- Gestión de dominios de correo y buzones
+- Crear/modificar dominios de correo
 - Operaciones masivas (p. ej. "aplicar este refuerzo de nginx a todos los sitios")
 - Herramientas de fallback a CLI sobre SSH para operaciones no disponibles en REST (`transfer`, `firewall save/restore`, `panel ip_match`)
 - `outputSchema` MCP estructurado para que los clientes puedan renderizar resultados tipados

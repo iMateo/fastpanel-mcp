@@ -1,9 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { randomInt } from "node:crypto";
 import { z } from "zod";
 import type { FastPanelClient } from "./client.js";
 import { FastPanelError } from "./client.js";
 import type { SshClient } from "./ssh.js";
 import { shq } from "./ssh.js";
+import type { PasswordStore } from "./vault.js";
 
 function asJsonText(data: unknown) {
   return {
@@ -66,6 +68,79 @@ function redactPasswords(obj: unknown): unknown {
   return out;
 }
 
+// FastPanel never exposes a mailbox password through its API or CLI. (It keeps a dovecot
+// {CRAM-MD5} hash for IMAP auth plus a reversible copy that only its own panel process can
+// decrypt and uses for the Roundcube autologin — but there is no supported way to read either
+// back.) So the mailbox tools mint the password themselves and hand it back exactly once in the
+// tool result, which is the only moment the caller can see it.
+const PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+function generatePassword(length = 24): string {
+  let out = "";
+  for (let i = 0; i < length; i++) out += PASSWORD_ALPHABET[randomInt(PASSWORD_ALPHABET.length)];
+  return out;
+}
+
+const GENERATED_PASSWORD_NOTE =
+  "generated_password is shown ONCE — FastPanel exposes no way to read a mailbox password back later. " +
+  "Save it to a password manager now; the only recovery is another reset (which breaks every client still using the old one).";
+
+// After a password has been set on the panel, mirror it into the local vault (when enabled).
+// A vault failure must never fail the tool: the panel write already happened, and the caller
+// still needs the generated password from the result.
+async function rememberPassword(
+  vault: PasswordStore,
+  address: string | undefined,
+  password: string,
+): Promise<Record<string, string>> {
+  if (!vault.enabled) return {};
+  if (!address) return { password_store_error: "mailbox address unknown — password not saved to the local store" };
+  try {
+    await vault.save(address, password);
+    return { password_stored: `${vault.describe()} — retrieve later with mailbox_password_get` };
+  } catch (err) {
+    return { password_store_error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+const mailboxLogin = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "local part only: letters, digits, dot, underscore, dash");
+
+type MailboxRecord = {
+  id: number;
+  domain_id?: number;
+  login: string;
+  address?: string;
+  enabled?: boolean;
+  quota?: number;
+  size?: number;
+  save_in_box?: boolean;
+  spam_to_junk?: boolean;
+  spamassassin?: boolean;
+  redirects?: Array<{ redirect: string }>;
+  aliases?: Array<{ login: string }>;
+  created_at?: string;
+};
+
+function compactMailbox(b: MailboxRecord) {
+  return {
+    id: b.id,
+    domain_id: b.domain_id,
+    address: b.address,
+    login: b.login,
+    enabled: b.enabled,
+    size: b.size,
+    quota: b.quota,
+    redirects: (b.redirects ?? []).map((r) => r.redirect),
+    aliases: (b.aliases ?? []).map((a) => a.login),
+    save_in_box: b.save_in_box,
+    spam_to_junk: b.spam_to_junk,
+    created_at: b.created_at,
+  };
+}
+
 // MCP tool annotations — hints so clients and external scanners classify tools
 // correctly (a read-only diagnostic must not be lumped in with a destructive write).
 // openWorldHint is true for every tool: they all reach a remote FastPanel host or its shell.
@@ -77,6 +152,7 @@ export function registerTools(
   server: McpServer,
   client: FastPanelClient,
   ssh: SshClient,
+  vault: PasswordStore,
 ): void {
   // ──────────────────────────────────────────────────────────────────────────
   // READ TOOLS
@@ -394,6 +470,124 @@ export function registerTools(
       try {
         const data = await client.get("/api/settings");
         return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "email_domains_list",
+    "List email (mail) domains — the containers that mailboxes live in. Maps to GET /api/email/domains, or GET /api/sites/{site_id}/email/domains when site_id is given. Use the returned id as domain_id for mailboxes_list / mailbox_create. Compact by default (the full object embeds the whole SSL certificate record).",
+    {
+      site_id: z.number().int().positive().optional().describe("Only email domains attached to this site"),
+      compact: z.boolean().default(true).describe("Return essential fields only (default). false = full objects."),
+    },
+    ANN_READ,
+    async ({ site_id, compact }) => {
+      try {
+        const resp = await client.get<{ data: Array<Record<string, any>> }>(
+          site_id ? `/api/sites/${site_id}/email/domains` : "/api/email/domains",
+        );
+        if (!compact || !Array.isArray(resp?.data)) return asJsonText(resp);
+        return asJsonText({
+          data: resp.data.map((d) => ({
+            id: d.id,
+            name: d.name,
+            enabled: d.enabled,
+            owner: d.owner?.username ?? d.owner_id,
+            site_id: d.virtualhost_id,
+            dkim: d.dkim,
+            dkim_selector: d.dkim_selector,
+            ips: Array.isArray(d.ips) ? d.ips.map((i: { ip: string }) => i.ip) : d.ips,
+            fallback: d.fallback,
+            certificate: d.certificate
+              ? { id: d.certificate.id, common_name: d.certificate.common_name, expired_at: d.certificate.expired_at }
+              : null,
+          })),
+        });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "email_domain_dkim_get",
+    "Get the DKIM DNS record (name, type, TXT content with the public key) for an email domain. Maps to GET /api/email/domains/{domain_id}/dkim. Use it to publish/verify the DKIM record when DNS is hosted outside the panel.",
+    { domain_id: z.number().int().positive().describe("Email domain id from email_domains_list") },
+    ANN_READ,
+    async ({ domain_id }) => {
+      try {
+        const data = await client.get(`/api/email/domains/${domain_id}/dkim`);
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "mailboxes_list",
+    "List mailboxes of one email domain: address, enabled, size (bytes used), quota, redirects (forwarding targets), aliases, save_in_box (keep a local copy when forwarding), spam_to_junk. Maps to GET /api/email/domains/{domain_id}/boxs (sic — 'boxs'). Passwords are NOT returned: FastPanel exposes no API/CLI path to read a mailbox password back (it keeps a one-way IMAP hash plus a reversible copy only the panel process itself can decrypt). To give someone access to an existing box, reset it with mailbox_update generate_password:true. When the local password store is enabled (FASTPANEL_PASSWORD_STORE), each box also carries password_stored — true means mailbox_password_get can return its password.",
+    {
+      domain_id: z.number().int().positive().describe("Email domain id from email_domains_list"),
+      compact: z.boolean().default(true).describe("Return essential fields only (default). false = full objects incl. owner."),
+    },
+    ANN_READ,
+    async ({ domain_id, compact }) => {
+      try {
+        const resp = await client.get<{ data: MailboxRecord[] }>(`/api/email/domains/${domain_id}/boxs`);
+        if (!compact || !Array.isArray(resp?.data)) return asJsonText(resp);
+        if (!vault.enabled) return asJsonText({ data: resp.data.map(compactMailbox) });
+        // With the local password store on, flag which boxes have a retrievable password.
+        const data = await Promise.all(
+          resp.data.map(async (b) => ({
+            ...compactMailbox(b),
+            password_stored: b.address ? await vault.has(b.address).catch(() => false) : false,
+          })),
+        );
+        return asJsonText({ data });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "mailbox_get",
+    "Get one mailbox by id (full object: redirects, aliases, quota, size, flags, owner). Maps to GET /api/mail/box/{box_id} — note the different URL family from the list endpoint. The password is never returned — FastPanel has no endpoint that reveals it.",
+    { box_id: z.number().int().positive().describe("Mailbox id from mailboxes_list") },
+    ANN_READ,
+    async ({ box_id }) => {
+      try {
+        const data = await client.get(`/api/mail/box/${box_id}`);
+        return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "mailbox_password_get",
+    "Return the password of a mailbox from the operator's LOCAL password store (macOS Keychain) — not from FastPanel, which never reveals a mailbox password through its API or CLI. Works only when FASTPANEL_PASSWORD_STORE=keychain is set and only for passwords that were set through mailbox_create / mailbox_update while the store was enabled (mailboxes_list shows password_stored per box). If nothing is stored, the only way to get a known password is a reset via mailbox_update generate_password:true — which breaks clients using the old one. SENSITIVE: the result contains a plaintext credential; only call it when the user asks for that mailbox's password. The stored value can be stale if the password was later changed in the panel UI.",
+    {
+      address: z.string().email().describe("Full mailbox address, e.g. support@example.com (the `address` field from mailboxes_list)"),
+    },
+    ANN_READ,
+    async ({ address }) => {
+      try {
+        const password = await vault.get(address.toLowerCase());
+        if (password === null) {
+          return asError(
+            new Error(
+              `No stored password for ${address} in ${vault.describe()}. It was created or last changed outside this MCP (or before the store was enabled). ` +
+                `To get a known password, reset it: mailbox_update with generate_password:true.`,
+            ),
+          );
+        }
+        return asJsonText({ address, password, source: vault.describe() });
       } catch (err) {
         return asError(err);
       }
@@ -1482,6 +1676,141 @@ export function registerTools(
         logWrite("PUT /api/master", redactPasswords(masterPayload));
         const data = await client.put("/api/master", masterPayload);
         return asJsonText(data);
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "mailbox_create",
+    "Create a mailbox in an email domain. Maps to POST /api/email/domains/{domain_id}/boxs. WRITE operation — set dry_run:true first, then confirm:true to execute. Pass either `password` or generate_password:true (recommended): the generated password is returned ONCE in the result as generated_password and can never be read back afterwards (FastPanel keeps only a hash) — store it in a password manager immediately. If the local password store is enabled (FASTPANEL_PASSWORD_STORE=keychain) the password — generated or explicit — is also saved there automatically and stays retrievable via mailbox_password_get. `redirects` forwards incoming mail to other addresses; with redirects set, save_in_box decides whether a copy also stays in this box. `aliases` are extra local parts on the same domain delivering to this box. Async: the response comes back with action:\"CREATING\" and the box becomes usable a second or two later (mailbox_get shows action:null when done).",
+    {
+      domain_id: z.number().int().positive().describe("Email domain id from email_domains_list"),
+      login: mailboxLogin.describe("Local part before the @, e.g. 'support' for support@example.com"),
+      password: z.string().min(8).max(255).optional().describe("Mailbox password (8-255 chars). Omit when generate_password is true."),
+      generate_password: z
+        .boolean()
+        .default(false)
+        .describe("Generate a strong random 24-char password and return it once in the result."),
+      quota: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(0)
+        .describe("Mailbox quota in MB (rendered as dovecot quota_rule bytes=<n>M); 0 = unlimited"),
+      redirects: z.array(z.string().email()).default([]).describe("Forward incoming mail to these addresses"),
+      aliases: z.array(mailboxLogin).default([]).describe("Alias local parts on the same domain, e.g. ['info','hello']"),
+      save_in_box: z
+        .boolean()
+        .optional()
+        .describe("Keep a local copy when redirects are set. Default: true if redirects are given (false would make the box forward-only)."),
+      spam_to_junk: z.boolean().default(true).describe("Deliver detected spam to the Junk folder (panel default for existing boxes)"),
+      confirm: z.boolean().default(false).describe("Must be true to execute. Safety guard."),
+      dry_run: z.boolean().default(false).describe("If true, show the payload that would be sent without executing."),
+    },
+    ANN_CREATE,
+    async ({ domain_id, login, password, generate_password, quota, redirects, aliases, save_in_box, spam_to_junk, confirm, dry_run }) => {
+      try {
+        if (generate_password === Boolean(password)) {
+          throw new Error("Pass exactly one of `password` or `generate_password:true`.");
+        }
+        const op = `POST /api/email/domains/${domain_id}/boxs`;
+        const payload = {
+          login,
+          password: password ?? "",
+          quota,
+          redirects: redirects.map((redirect) => ({ redirect })),
+          aliases: aliases.map((a) => ({ login: a })),
+          save_in_box: save_in_box ?? redirects.length > 0,
+          spam_to_junk,
+        };
+        const preview = {
+          ...(redactPasswords(payload) as object),
+          ...(generate_password ? { password: "*** (generated on execute, returned once)" } : {}),
+        };
+        const g = writeGuard({ confirm, dry_run }, op, preview);
+        if (g.kind === "dry") return g.result;
+        const generated = generate_password ? generatePassword() : null;
+        if (generated) payload.password = generated;
+        logWrite(op, redactPasswords(payload));
+        const data = await client.post<{ data?: MailboxRecord }>(op.slice(5), payload);
+        const stored = await rememberPassword(vault, data?.data?.address, payload.password);
+        return asJsonText({
+          ...data,
+          ...(generated ? { generated_password: generated } : {}),
+          ...stored,
+          ...(generated && !stored.password_stored ? { note: GENERATED_PASSWORD_NOTE } : {}),
+        });
+      } catch (err) {
+        return asError(err);
+      }
+    },
+  );
+
+  server.tool(
+    "mailbox_update",
+    "Change an existing mailbox: reset its password, enable/disable it, change quota, redirects (forwarding), aliases, save_in_box, spam_to_junk. Maps to PUT /api/mail/box/{box_id}. WRITE operation — set dry_run:true first, then confirm:true to execute. Only the fields you pass change: the tool reads the current box and re-sends the rest (the panel form PUTs the whole object). `redirects` and `aliases` REPLACE the whole list — pass the full desired list, [] to clear. Password reset: `password` or generate_password:true (returned ONCE as generated_password, never retrievable later). WARNING: a password reset immediately breaks every mail client / integration still using the old password — existing passwords cannot be viewed through FastPanel, only replaced. Omitting the password keeps the current one. With the local password store enabled, any new password is saved there automatically (mailbox_password_get). Async: the response has action:\"UPDATING\"; poll mailbox_get until action is null.",
+    {
+      box_id: z.number().int().positive().describe("Mailbox id from mailboxes_list"),
+      password: z.string().min(8).max(255).optional().describe("New password (8-255 chars). Omit to keep the current one."),
+      generate_password: z
+        .boolean()
+        .default(false)
+        .describe("Reset to a strong random 24-char password and return it once in the result."),
+      enabled: z.boolean().optional().describe("false disables the mailbox (no login/delivery) without deleting it"),
+      quota: z.number().int().nonnegative().optional().describe("Quota in MB; 0 = unlimited"),
+      redirects: z.array(z.string().email()).optional().describe("Full replacement list of forwarding addresses; [] removes all"),
+      aliases: z.array(mailboxLogin).optional().describe("Full replacement list of alias local parts; [] removes all"),
+      save_in_box: z.boolean().optional().describe("Keep a local copy of forwarded mail. false + redirects = forward-only box."),
+      spam_to_junk: z.boolean().optional().describe("Deliver detected spam to the Junk folder"),
+      confirm: z.boolean().default(false).describe("Must be true to execute. Safety guard."),
+      dry_run: z.boolean().default(false).describe("If true, show the payload that would be sent without executing."),
+    },
+    ANN_MODIFY,
+    async ({ box_id, password, generate_password, enabled, quota, redirects, aliases, save_in_box, spam_to_junk, confirm, dry_run }) => {
+      try {
+        if (generate_password && password) {
+          throw new Error("Pass either `password` or `generate_password:true`, not both.");
+        }
+        const changes = { password, enabled, quota, redirects, aliases, save_in_box, spam_to_junk };
+        if (!generate_password && Object.values(changes).every((v) => v === undefined)) {
+          throw new Error("Nothing to update — pass at least one field to change.");
+        }
+        const op = `PUT /api/mail/box/${box_id}`;
+        // Single-resource GETs wrap the object in {data: …}.
+        const current = (await client.get<{ data: MailboxRecord }>(`/api/mail/box/${box_id}`)).data;
+        if (!current?.id) throw new Error(`Mailbox ${box_id} not found (unexpected response shape).`);
+        const payload: Record<string, unknown> = {
+          id: current.id,
+          login: current.login,
+          enabled: enabled ?? current.enabled,
+          quota: quota ?? current.quota ?? 0,
+          redirects: (redirects ?? (current.redirects ?? []).map((r) => r.redirect)).map((redirect) => ({ redirect })),
+          aliases: (aliases ?? (current.aliases ?? []).map((a) => a.login)).map((a) => ({ login: a })),
+          save_in_box: save_in_box ?? current.save_in_box,
+          spam_to_junk: spam_to_junk ?? current.spam_to_junk,
+        };
+        if (password) payload.password = password;
+        const preview = {
+          _target: current.address,
+          ...(redactPasswords(payload) as object),
+          ...(generate_password ? { password: "*** (generated on execute, returned once)" } : {}),
+        };
+        const g = writeGuard({ confirm, dry_run }, op, preview);
+        if (g.kind === "dry") return g.result;
+        const generated = generate_password ? generatePassword() : null;
+        if (generated) payload.password = generated;
+        logWrite(op, redactPasswords(payload));
+        const data = await client.put<Record<string, unknown>>(`/api/mail/box/${box_id}`, payload);
+        const newPassword = typeof payload.password === "string" ? payload.password : null;
+        const stored = newPassword ? await rememberPassword(vault, current.address, newPassword) : {};
+        return asJsonText({
+          ...data,
+          ...(generated ? { address: current.address, generated_password: generated } : {}),
+          ...stored,
+          ...(generated && !stored.password_stored ? { note: GENERATED_PASSWORD_NOTE } : {}),
+        });
       } catch (err) {
         return asError(err);
       }

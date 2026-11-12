@@ -33,7 +33,7 @@ Stellen Sie einem LLM eine Anfrage und erhalten Sie echte Infrastrukturänderung
 
 ## Funktionen
 
-- **32 Tools**, die Websites, Datenbanken (inkl. SSH-Dump/-Import), Benutzer, DNS-Zonen, SSL-Zertifikate, Systemauslastung, Warteschlange, Website-Logs, Backup-Pläne, hostbasierte Diagnosen, Datei-Upload/-Deployment in das Web-Root einer Website sowie rohe nginx-/Apache-/php.ini-Konfigurationen abdecken.
+- **39 Tools**, die Websites, E-Mail-Domains und Postfächer, Datenbanken (inkl. SSH-Dump/-Import), Benutzer, DNS-Zonen, SSL-Zertifikate, Systemauslastung, Warteschlange, Website-Logs, Backup-Pläne, hostbasierte Diagnosen, Datei-Upload/-Deployment in das Web-Root einer Website sowie rohe nginx-/Apache-/php.ini-Konfigurationen abdecken.
 - **Duales Token-Sicherheitsmodell.** Leseoperationen verwenden ein Nur-Lese-Token; schreibende Operationen erfordern ein separates Schreib-Token (`FASTPANEL_WRITE_TOKEN`). Wird das Schreib-Token nicht gesetzt, schlägt jedes Schreib-Tool zuverlässig fehl.
 - **`confirm: true` erforderlich** bei jedem Schreibvorgang. Versehentliche LLM-Ausgaben können den Zustand nicht verändern.
 - **`dry_run: true` zeigt eine Vorschau** des genauen HTTP-Bodys, den der Server erhalten würde — Passwörter werden als `***` geschwärzt, kein Netzwerkaufruf wird ausgelöst.
@@ -173,6 +173,11 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `backup_plans_list` | `GET /api/v2/backup/plans` | Konfigurierte Backup-Pläne |
 | `me` | `GET /api/me` | Konto hinter dem aktuellen Lese-Token (Benutzername, Rollen, SSH) |
 | `settings_get` | `GET /api/settings` | Panelweite Einstellungen (Betriebssystem, Lizenz, Limits, Benachrichtigungen) |
+| `email_domains_list` | `GET /api/email/domains` | E-Mail-Domains auflisten (optional für eine Website); die ids werden von den Postfach-Tools benötigt |
+| `email_domain_dkim_get` | `GET /api/email/domains/{id}/dkim` | DKIM-DNS-Eintrag (TXT mit öffentlichem Schlüssel) einer E-Mail-Domain |
+| `mailboxes_list` | `GET /api/email/domains/{id}/boxs` | Postfächer einer Domain: Größe, Quota, Weiterleitungen, Aliasse, Flags (standardmäßig kompakt) |
+| `mailbox_get` | `GET /api/mail/box/{id}` | Ein Postfach, vollständiges Objekt. Passwörter werden nie zurückgegeben — FastPanel gibt keines preis |
+| `mailbox_password_get` | macOS Keychain | Passwort eines Postfachs aus dem **lokalen** Passwortspeicher (macOS-Schlüsselbund). Opt-in über `FASTPANEL_PASSWORD_STORE=keychain`; kennt nur Passwörter, die über diesen MCP gesetzt wurden |
 
 ### Schreiben (erfordert `FASTPANEL_WRITE_TOKEN` + explizites `confirm: true`)
 
@@ -186,6 +191,15 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `site_backend_update` | `PUT /api/sites/backend/{backend_id}` | PHP-Version, Handler, Port, Socket, Umgebungsvariablen ändern (Website-ID übergeben — Backend-ID wird intern aufgelöst) |
 | `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Rohes nginx-/Apache-/php.ini-Konfiguration der Website ersetzen. **Gefährlich**: Fehlerhafte Syntax kann die Website beschädigen — bei konfiguriertem SSH wird `nginx -t` nach dem Anwenden ausgeführt und bei Fehler **automatisch zurückgesetzt** (`validate: false` zum Überspringen) |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Neues Let's Encrypt-Zertifikat ausstellen (asynchron — `queue_active` abfragen) |
+| `mailbox_create` | `POST /api/email/domains/{id}/boxs` | Postfach mit Weiterleitungen / Aliassen / Quota anlegen. `generate_password: true` erzeugt ein starkes Passwort und gibt es **einmalig** zurück |
+| `mailbox_update` | `PUT /api/mail/box/{id}` | Passwort zurücksetzen (optional generiert, einmalig angezeigt), aktivieren/deaktivieren, Quota / Weiterleitungen / Aliasse ändern — nur übergebene Felder ändern sich |
+
+### Passwortspeicher für Postfächer (optional)
+
+FastPanel bietet keine Möglichkeit, ein Postfach-Passwort wieder auszulesen — weder API noch CLI geben eines zurück (intern hält es einen Einweg-Hash für IMAP plus eine umkehrbare Kopie, die nur der Panel-Prozess selbst entschlüsseln kann, für seinen eigenen Roundcube-Autologin). Einen neuen Client an ein bestehendes technisches Postfach anzubinden bedeutet daher normalerweise, das Passwort zurückzusetzen und alles andere zu unterbrechen, das es nutzt. Mit `FASTPANEL_PASSWORD_STORE=keychain` (nur macOS) wird jedes über `mailbox_create` / `mailbox_update` gesetzte Passwort — generiert oder explizit — zusätzlich im Anmelde-Schlüsselbund gespeichert (Dienst `fastpanel-mcp:<Panel-Host>`, Account = Postfachadresse; sichtbar in der Schlüsselbundverwaltung). `mailbox_password_get` liest es wieder aus, und `mailboxes_list` markiert jedes Postfach mit `password_stored`.
+
+Passwörter, die vor Aktivierung des Speichers gesetzt oder später in der Panel-Oberfläche geändert wurden, kennt er nicht. Das Geheimnis wird über stdin an `security` übergeben, nie über argv, und nie protokolliert. Abwägung: Jeder Prozess unter Ihrem macOS-Benutzer kann diese Einträge lesen, und `mailbox_password_get` bringt ein Klartext-Passwort in den Kontext des Modells — lassen Sie den Speicher deaktiviert, wenn das nicht akzeptabel ist.
+
 
 ### SSH-gestützt (erfordert `FASTPANEL_SSH_HOST`)
 
@@ -244,7 +258,7 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 - **stderr-Auditprotokoll** erfasst jeden ausgeführten Schreibvorgang mit geschwärztem Payload. In Claude Code ist dies in den MCP-Logs sichtbar.
 - **`nginx -t`-Autovalidierung.** Bei konfiguriertem SSH führt `site_configuration_update` direkt nach dem Anwenden `nginx -t` aus und **setzt automatisch auf die vorherige Konfiguration zurück**, wenn die Validierung fehlschlägt — eine fehlerhafte Änderung kann nginx nicht in einen nicht neu ladbaren Zustand versetzen. Übergeben Sie `validate: false`, um dies zu deaktivieren.
 - **Tool-Annotationen.** Jedes Tool liefert MCP-`readOnlyHint`-/`destructiveHint`-/`idempotentHint`-/`openWorldHint`-Hinweise, damit MCP-Clients und externe Richtliniens-Gateways für jedes Tool die richtigen Schutzmaßnahmen anwenden können.
-- **Noch keine Lösch-Tools.** Destruktive Operationen verbleiben in der Benutzeroberfläche, bis sie bewusst hinzugefügt werden.
+- **Noch keine Lösch-Tools** — auch kein Löschen/Leeren von Postfächern. Destruktive Operationen bleiben vorerst in der Benutzeroberfläche; sie sind für später geplant, sobald das MCP-Protokoll selbst stärkere Sicherheitsgarantien für irreversible Aktionen bietet.
 - **IP-gesperrte Tokens** (`mogwai users tokens add -c <ip>`), sodass ein geleaktes Token nicht von anderen Adressen aus verwendet werden kann.
 
 ## Bekannte Tücken
@@ -258,10 +272,10 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 
 ## Roadmap
 
-- Lösch-Tools (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`)
+- Lösch-Tools (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`, Postfächer löschen/leeren) — später, wenn MCP für irreversible Operationen sicherer geworden ist
 - DNS-Einträge CRUD
 - Backup-Plan-Verwaltung (auflisten / ausführen / wiederherstellen)
-- E-Mail-Domain- und Postfach-Verwaltung
+- E-Mail-Domains anlegen/ändern
 - Massenoperationen (z. B. „diese nginx-Härtung auf alle Websites anwenden")
 - CLI-Fallback-Tools über SSH für Operationen, die nicht in REST verfügbar sind (`transfer`, `firewall save/restore`, `panel ip_match`)
 - Strukturiertes MCP-`outputSchema`, damit Clients typisierte Ergebnisse darstellen können

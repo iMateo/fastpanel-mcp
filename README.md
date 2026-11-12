@@ -31,7 +31,7 @@ Ask an LLM, get real infra changes on your FastPanel server:
 
 ## Features
 
-- **32 tools** covering sites, databases (incl. SSH dump/import), users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, file upload/deploy into a site's web root, and raw nginx/apache/php.ini configs.
+- **39 tools** covering sites, email domains & mailboxes, databases (incl. SSH dump/import), users, DNS zones, SSL certificates, system load, queue, site logs, backup plans, host-level diagnostics, file upload/deploy into a site's web root, and raw nginx/apache/php.ini configs.
 - **Dual-token safety model.** Read operations use a read-only token; mutating operations require a separate write token (`FASTPANEL_WRITE_TOKEN`). Unset the write token and every write tool fails closed.
 - **`confirm: true` required** on every write. Accidental LLM outputs cannot mutate state.
 - **`dry_run: true` previews** the exact HTTP body the server would receive — passwords redacted as `***`, no network call fired.
@@ -171,6 +171,11 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `backup_plans_list` | `GET /api/v2/backup/plans` | Configured backup plans |
 | `me` | `GET /api/me` | Account behind the current read token (username, roles, ssh) |
 | `settings_get` | `GET /api/settings` | Panel-wide settings (OS, license, limits, notifications) |
+| `email_domains_list` | `GET /api/email/domains` | List email domains (optionally for one site); ids feed the mailbox tools |
+| `email_domain_dkim_get` | `GET /api/email/domains/{id}/dkim` | DKIM DNS record (TXT with public key) for an email domain |
+| `mailboxes_list` | `GET /api/email/domains/{id}/boxs` | Mailboxes of a domain: size, quota, redirects, aliases, flags (compact by default) |
+| `mailbox_get` | `GET /api/mail/box/{id}` | One mailbox, full object. Passwords are never returned — FastPanel exposes no path to read one |
+| `mailbox_password_get` | macOS Keychain | Password of a mailbox from the **local** password store (macOS Keychain). Opt-in via `FASTPANEL_PASSWORD_STORE=keychain`; only knows passwords set through this MCP |
 
 ### Write (require `FASTPANEL_WRITE_TOKEN` + explicit `confirm: true`)
 
@@ -184,6 +189,15 @@ FASTPANEL_URL=… FASTPANEL_TOKEN=… node scripts/smoke.mjs
 | `site_backend_update` | `PUT /api/sites/backend/{backend_id}` | Change PHP version, handler, port, socket, env vars (pass site id — backend id resolved internally) |
 | `site_configuration_update` | `PUT /api/sites/{id}/configuration` | Replace raw nginx/apache/php.ini for the site. **Dangerous**: bad syntax can break the site — when SSH is configured, runs `nginx -t` after applying and **auto-reverts** on failure (`validate: false` to skip) |
 | `certificate_create_letsencrypt` | `POST /api/certificates` | Issue a new Let's Encrypt certificate (async — poll `queue_active`) |
+| `mailbox_create` | `POST /api/email/domains/{id}/boxs` | Create a mailbox with redirects / aliases / quota. `generate_password: true` mints a strong password and returns it **once** |
+| `mailbox_update` | `PUT /api/mail/box/{id}` | Reset password (optionally generated, returned once), enable/disable, change quota / redirects / aliases — only the fields you pass change |
+
+### Mailbox password store (optional)
+
+FastPanel exposes no way to read a mailbox password back — no API or CLI returns one (internally it keeps a one-way IMAP hash plus a reversible copy only the panel process itself can decrypt, for its own Roundcube autologin). So handing an existing technical mailbox to a new client normally means resetting its password and breaking everything else that uses it. Set `FASTPANEL_PASSWORD_STORE=keychain` (macOS only) and every password set through `mailbox_create` / `mailbox_update` — generated or explicit — is also saved to your login Keychain (service `fastpanel-mcp:<panel host>`, account = mailbox address; visible in Keychain Access). `mailbox_password_get` reads it back and `mailboxes_list` marks each box with `password_stored`.
+
+Passwords set before the store was enabled, or changed later in the panel UI, are not known to it. The secret is passed to `security` over stdin, never in argv, and never logged. Trade-off: anything running as your macOS user can read these entries, and `mailbox_password_get` puts a plaintext credential into the model's context — leave the store off if that is not acceptable.
+
 
 ### SSH-backed (require `FASTPANEL_SSH_HOST`)
 
@@ -242,7 +256,7 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 - **stderr audit log** records every executed write with redacted payload. In Claude Code this surfaces in MCP logs.
 - **`nginx -t` auto-validation.** With SSH configured, `site_configuration_update` runs `nginx -t` right after applying and **auto-reverts to the previous config** if it fails — a bad edit can't leave nginx unable to reload. Pass `validate: false` to opt out.
 - **Tool annotations.** Every tool ships MCP `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` hints so MCP clients and external policy gateways can apply the right guardrails per tool.
-- **No delete tools** yet. Destructive operations are left to the UI until they're deliberately added.
+- **No delete tools** yet — including mailbox delete/purge. Destructive operations stay in the UI for now; they are planned for later, once the MCP protocol itself offers stronger safety guarantees for irreversible actions.
 - **IP-lock tokens** (`mogwai users tokens add -c <ip>`) so a leaked token can't be used from elsewhere.
 
 ## Known gotchas
@@ -256,10 +270,10 @@ site_configuration_update(site_id, frontend=<edited>, backend=<unchanged>, phpin
 
 ## Roadmap
 
-- Delete tools (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`)
+- Delete tools (`user_delete`, `site_delete`, `database_delete`, `certificate_delete`, mailbox delete/purge) — later, when MCP gets safer for irreversible operations
 - DNS record CRUD
 - Backup plan management (list / run / restore)
-- Email domain + mailbox management
+- Email domain create/update
 - Bulk operations (e.g. "apply this nginx hardening to every site")
 - CLI-fallback tools over SSH for ops not in REST (`transfer`, `firewall save/restore`, `panel ip_match`)
 - Structured MCP `outputSchema` so clients can render typed results

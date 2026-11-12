@@ -13,5 +13,7 @@ export interface Config {
     insecureTls: boolean;
     timeoutMs: number;
     ssh: SshConfig | null;
+    /** Opt-in local vault for mailbox passwords; null = passwords are never persisted. */
+    passwordStore: "keychain" | null;
 }
 export declare function loadConfig(): Config;

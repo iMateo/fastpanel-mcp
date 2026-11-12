@@ -70,6 +70,7 @@ try {
   summarize(await rpc("tools/call", { name: "databases_list", arguments: {} }), "databases_list");
   summarize(await rpc("tools/call", { name: "sites_list", arguments: {} }), "sites_list");
   summarize(await rpc("tools/call", { name: "dns_domains_list", arguments: {} }), "dns_domains_list");
+  summarize(await rpc("tools/call", { name: "email_domains_list", arguments: {} }), "email_domains_list");
   summarize(await rpc("tools/call", { name: "system_load", arguments: {} }), "system_load");
   summarize(await rpc("tools/call", { name: "queue_list", arguments: {} }), "queue_list");
 } finally {

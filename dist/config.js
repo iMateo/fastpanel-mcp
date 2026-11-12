@@ -25,6 +25,10 @@ export function loadConfig() {
             timeoutMs: Number(process.env.FASTPANEL_SSH_TIMEOUT_MS ?? 15_000),
         }
         : null;
+    const store = process.env.FASTPANEL_PASSWORD_STORE?.trim().toLowerCase();
+    if (store && store !== "keychain") {
+        throw new Error(`FASTPANEL_PASSWORD_STORE: unsupported value "${store}" (supported: "keychain", macOS only)`);
+    }
     return {
         baseUrl,
         readToken,
@@ -32,6 +36,7 @@ export function loadConfig() {
         insecureTls: process.env.FASTPANEL_INSECURE_TLS === "1",
         timeoutMs: Number(process.env.FASTPANEL_TIMEOUT_MS ?? 30_000),
         ssh,
+        passwordStore: store ? "keychain" : null,
     };
 }
 //# sourceMappingURL=config.js.map
